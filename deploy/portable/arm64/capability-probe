@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+arch=$(uname -m)
+kernel=$(uname -r)
+model=$(awk -F: '/^(model name|Hardware|CPU implementer)/ {gsub(/^[ \t]+/, "", $2); printf "%s ", $2; if (++found == 4) exit}' /proc/cpuinfo)
+midr=$(cat /sys/devices/system/cpu/cpu0/regs/identification/midr_el1 2>/dev/null || true)
+numa_nodes=$(find /sys/devices/system/node -maxdepth 1 -type d -name 'node[0-9]*' 2>/dev/null | wc -l)
+
+printf 'architecture=%s\n' "$arch"
+printf 'kernel=%s\n' "$kernel"
+printf 'cpu=%s\n' "$model"
+printf 'midr=%s\n' "$midr"
+printf 'numa_nodes=%s\n' "$numa_nodes"
+if [[ -r /sys/kernel/btf/vmlinux ]]; then printf 'btf=available\n'; else printf 'btf=missing\n'; fi
+if [[ -d /sys/kernel/tracing || -d /sys/kernel/debug/tracing ]]; then printf 'tracefs=available\n'; else printf 'tracefs=missing\n'; fi
+printf 'pmus='
+find /sys/bus/event_source/devices -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null | sort || true
+printf '\n'

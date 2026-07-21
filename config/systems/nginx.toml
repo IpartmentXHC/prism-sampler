@@ -1,0 +1,4 @@
+name = "nginx"
+primary_pid_command = "pgrep -f 'nginx: master process' | head -1"
+all_pid_command = "pgrep -x nginx"
+

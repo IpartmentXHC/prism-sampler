@@ -1,0 +1,16 @@
+[profiles.minimal]
+required = ["prism"]
+optional = ["phase-marker"]
+
+[profiles.relationship]
+required = ["prism", "snapshot"]
+optional = ["phase-marker"]
+
+[profiles.policy]
+required = ["prism", "snapshot"]
+optional = ["perf-core", "perf-uncore", "phase-marker"]
+
+[profiles.diagnostic]
+required = ["prism", "snapshot"]
+optional = ["perf-core", "perf-uncore", "arm-spe", "phase-marker"]
+

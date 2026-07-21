@@ -1,0 +1,4 @@
+name = "doris"
+primary_pid_command = "pgrep -x doris_be | head -1"
+all_pid_command = "pgrep -x doris_be"
+

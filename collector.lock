@@ -1,0 +1,11 @@
+schema_version = 1
+repository = "https://github.com/IpartmentXHC/prism.git"
+commit = "a0ac7a46386182e435317260367f9ed957ee3dc2"
+db_schema = "prism-duckdb-v1"
+architecture = "aarch64"
+build_kernel = "5.10.0-182.0.0.95.oe2203sp3.aarch64"
+build_glibc = "2.34"
+binary_sha256 = "89429a7a25a42a167e07a3e8b16dd9b1b54f34387f38bae1e610648780de4b75"
+full_support_kernel = "6.6"
+best_effort_kernels = ["5.10", "6.12"]
+

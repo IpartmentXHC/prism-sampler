@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+COLLECTOR="$ROOT/bin/metric-collector"
+LIB_DIR="$ROOT/lib"
+DATA_DIR=${PRISM_DATA_DIR:-"$ROOT/data"}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./prismctl preflight [--strict-6.6]
+  ./prismctl smoke [--strict-6.6|--best-effort] [--duration 20]
+  ./prismctl collect --pids PID[,PID...] [--output-dir DIR] [--file NAME]
+                     [--duration SECONDS]
+  ./prismctl collect --process-name NAME [other options]
+  ./prismctl start --pids PID[,PID...] [--output-dir DIR] [--file NAME]
+  ./prismctl stop [--state-dir DIR]
+  ./prismctl status [--state-dir DIR]
+
+Environment:
+  PRISM_DATA_DIR  Default data directory.
+  SUDO_ASKPASS    Optional executable askpass helper for sudo -A.
+  PRISM_SUDO      Optional sudo command, for example "sudo -n".
+EOF
+}
+
+# Prism ARM64 portable collector control tool.
+#
+# Usage:
+#   ./prismctl preflight
+#   ./prismctl smoke [--duration 20]
+#   ./prismctl collect --pids PID[,PID...] [--output-dir DIR] [--file NAME]
+#                      [--duration SECONDS]
+#   ./prismctl collect --process-name NAME [other options]
+#   ./prismctl start --pids PID[,PID...] [--output-dir DIR] [--file NAME]
+#   ./prismctl stop [--state-dir DIR]
+#   ./prismctl status [--state-dir DIR]
+#
+# Environment:
+#   PRISM_DATA_DIR     Default data directory.
+#   SUDO_ASKPASS       Optional executable askpass helper for sudo -A.
+#   PRISM_SUDO         Optional sudo command, for example "sudo -n".
+#
+# The collector requires root privileges for eBPF loading. If already root,
+# sudo is not used. Otherwise prismctl tries PRISM_SUDO, sudo -A, sudo -n, and
+# finally interactive sudo when a terminal is available.
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+note() {
+    echo "[prism] $*"
+}
+
+root_command() {
+    ROOT_CMD=()
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        return
+    fi
+    command -v sudo >/dev/null 2>&1 || die "root or sudo is required"
+    if [[ -n ${PRISM_SUDO:-} ]]; then
+        read -r -a ROOT_CMD <<<"$PRISM_SUDO"
+    elif [[ -n ${SUDO_ASKPASS:-} && -x ${SUDO_ASKPASS} ]]; then
+        ROOT_CMD=(sudo -A)
+    elif sudo -n true 2>/dev/null; then
+        ROOT_CMD=(sudo -n)
+    elif [[ -t 0 ]]; then
+        ROOT_CMD=(sudo)
+    else
+        die "sudo needs a password; configure passwordless sudo, SUDO_ASKPASS, or PRISM_SUDO"
+    fi
+}
+
+run_root() {
+    root_command
+    "${ROOT_CMD[@]}" "$@"
+}
+
+check_kernel_config() {
+    local config="/boot/config-$(uname -r)"
+    local required=(CONFIG_BPF CONFIG_BPF_SYSCALL CONFIG_BPF_JIT CONFIG_KPROBES CONFIG_FTRACE CONFIG_DEBUG_INFO_BTF)
+    local key
+    if [[ -r $config ]]; then
+        for key in "${required[@]}"; do
+            if ! grep -q "^${key}=y" "$config"; then
+                echo "WARN: ${key}=y was not found in $config"
+            fi
+        done
+    elif [[ -r /proc/config.gz ]] && command -v zgrep >/dev/null 2>&1; then
+        for key in "${required[@]}"; do
+            if ! zgrep -q "^${key}=y" /proc/config.gz; then
+                echo "WARN: ${key}=y was not found in /proc/config.gz"
+            fi
+        done
+    else
+        echo "WARN: kernel config is not readable; eBPF attach must be verified by smoke"
+    fi
+}
+
+preflight() {
+    local arch kernel ldd_output
+    local strict_66=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --strict-6.6) strict_66=1; shift ;;
+            *) die "unknown preflight option: $1" ;;
+        esac
+    done
+    arch=$(uname -m)
+    kernel=$(uname -r)
+    note "architecture=$arch"
+    note "kernel=$kernel"
+    [[ $arch == aarch64 || $arch == arm64 ]] || die "this package requires ARM64/aarch64"
+    if (( strict_66 )) && [[ $kernel != 6.6* ]]; then
+        die "strict mode requires Linux 6.6; found $kernel"
+    fi
+    [[ -x $COLLECTOR ]] || die "collector is missing or not executable: $COLLECTOR"
+    [[ -r /sys/kernel/btf/vmlinux ]] || die "/sys/kernel/btf/vmlinux is missing; kernel BTF is required"
+
+    if [[ -r $ROOT/manifest.sha256 ]]; then
+        (cd "$ROOT" && sha256sum -c manifest.sha256)
+        note "package_checksum=PASS"
+    else
+        echo "WARN: package manifest is missing"
+    fi
+
+    check_kernel_config
+    ldd_output=$(LD_LIBRARY_PATH="$LIB_DIR" ldd "$COLLECTOR" 2>&1) || {
+        echo "$ldd_output"
+        die "ldd failed"
+    }
+    echo "$ldd_output"
+    if grep -q "not found" <<<"$ldd_output"; then
+        die "one or more runtime libraries are missing"
+    fi
+
+    LD_LIBRARY_PATH="$LIB_DIR" "$COLLECTOR" --help >/dev/null
+    note "collector_userspace_check=PASS"
+    note "btf_check=PASS"
+    "$ROOT/capability-probe" || true
+
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        note "privilege_check=PASS(root)"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        note "privilege_check=PASS(passwordless-sudo)"
+    elif [[ -n ${SUDO_ASKPASS:-} && -x ${SUDO_ASKPASS} ]]; then
+        note "privilege_check=PASS(sudo-askpass-configured)"
+    else
+        echo "WARN: root access was not verified; smoke will require sudo"
+    fi
+}
+
+stop_pid() {
+    local pid=$1
+    local signal=${2:-INT}
+    run_root kill -"$signal" "$pid" 2>/dev/null || true
+}
+
+wait_for_exit() {
+    local pid=$1
+    local attempt
+    for attempt in $(seq 1 20); do
+        if ! run_root kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+smoke() {
+    local duration=20
+    local mode=auto
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --duration) duration=$2; shift 2 ;;
+            --strict-6.6) mode=strict; shift ;;
+            --best-effort) mode=best-effort; shift ;;
+            -h|--help) usage; return ;;
+            *) die "unknown smoke option: $1" ;;
+        esac
+    done
+    [[ $duration =~ ^[0-9]+$ ]] && (( duration >= 10 )) || die "smoke duration must be at least 10 seconds"
+
+    if [[ $mode == auto ]]; then
+        if [[ $(uname -r) == 6.6* ]]; then mode=strict; else mode=best-effort; fi
+    fi
+    if [[ $mode == strict ]]; then preflight --strict-6.6; else preflight; fi
+    root_command
+    local stamp run_dir target_pid collector_pid db_file
+    stamp=$(date +%Y%m%d-%H%M%S)
+    run_dir="$DATA_DIR/smoke-$stamp"
+    db_file="smoke-$stamp.db3"
+    mkdir -p "$run_dir"
+
+    bash -c '
+        file=$1
+        duration=$2
+        end=$((SECONDS + duration + 15))
+        while (( SECONDS < end )); do
+            printf "%s\n" "$SECONDS" >"$file"
+            read -r _ <"$file"
+        done
+    ' _ "$run_dir/workload.tmp" "$duration" &
+    target_pid=$!
+    echo "$target_pid" >"$run_dir/target.pid"
+
+    cleanup_smoke() {
+        kill "$target_pid" 2>/dev/null || true
+        rm -f "$run_dir/workload.tmp"
+    }
+    trap cleanup_smoke EXIT INT TERM
+
+    note "smoke_target_pid=$target_pid"
+    local mode_args=(--platform-profile auto)
+    if [[ $mode == strict ]]; then
+        mode_args+=(--subsystems taskstats,vfs,futex,iowait,aio,mux,net,discovery)
+        mode_args+=(--required-subsystems taskstats,vfs,futex,iowait,net)
+    else
+        mode_args+=(--best-effort)
+        mode_args+=(--subsystems taskstats,vfs,futex,iowait,aio,mux,net,discovery)
+        mode_args+=(--required-subsystems taskstats,futex,iowait)
+    fi
+    "${ROOT_CMD[@]}" env LD_LIBRARY_PATH="$LIB_DIR" \
+        "$COLLECTOR" \
+        --machine-id 1 \
+        --pids "$target_pid" \
+        --backend duckdb \
+        --duckdb-directory "$run_dir" \
+        --duckdb-file "$db_file" \
+        "${mode_args[@]}" \
+        >"$run_dir/collector.log" 2>&1 &
+    collector_pid=$!
+    echo "$collector_pid" >"$run_dir/collector.pid"
+
+    sleep "$duration"
+    if ! "${ROOT_CMD[@]}" kill -0 "$collector_pid" 2>/dev/null; then
+        tail -100 "$run_dir/collector.log" >&2 || true
+        die "collector exited before the smoke window completed"
+    fi
+
+    stop_pid "$collector_pid" INT
+    if ! wait_for_exit "$collector_pid"; then
+        stop_pid "$collector_pid" TERM
+        wait_for_exit "$collector_pid" || stop_pid "$collector_pid" KILL
+    fi
+    wait "$collector_pid" 2>/dev/null || true
+    cleanup_smoke
+    trap - EXIT INT TERM
+
+    [[ -s $run_dir/$db_file ]] || {
+        tail -100 "$run_dir/collector.log" >&2 || true
+        die "collector did not create a non-empty DB3"
+    }
+    if grep -Eiq '(^|[^a-z])(panic|fatal error)' "$run_dir/collector.log"; then
+        tail -100 "$run_dir/collector.log" >&2
+        die "collector log contains a fatal attach error"
+    fi
+    note "smoke_result=PASS"
+    note "db3=$run_dir/$db_file"
+    note "log=$run_dir/collector.log"
+    ls -lh "$run_dir/$db_file" "$run_dir/collector.log"
+}
+
+parse_collect_args() {
+    PIDS=""
+    PROCESS_NAME=""
+    OUTPUT_DIR="$DATA_DIR/manual-$(date +%Y%m%d-%H%M%S)"
+    DB_FILE="prism.db3"
+    DURATION=0
+    STATE_DIR=""
+    BEST_EFFORT=0
+    STRICT_66=0
+    PLATFORM_PROFILE=auto
+    SUBSYSTEMS=""
+    REQUIRED_SUBSYSTEMS=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --pids) PIDS=$2; shift 2 ;;
+            --process-name) PROCESS_NAME=$2; shift 2 ;;
+            --output-dir) OUTPUT_DIR=$2; shift 2 ;;
+            --file) DB_FILE=$2; shift 2 ;;
+            --duration) DURATION=$2; shift 2 ;;
+            --state-dir) STATE_DIR=$2; shift 2 ;;
+            --best-effort) BEST_EFFORT=1; shift ;;
+            --strict-6.6) STRICT_66=1; shift ;;
+            --platform-profile) PLATFORM_PROFILE=$2; shift 2 ;;
+            --subsystems) SUBSYSTEMS=$2; shift 2 ;;
+            --required-subsystems) REQUIRED_SUBSYSTEMS=$2; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown collect option: $1" ;;
+        esac
+    done
+    [[ -n $PIDS || -n $PROCESS_NAME ]] || die "provide --pids or --process-name"
+    [[ -z $PIDS || -z $PROCESS_NAME ]] || die "--pids and --process-name are mutually exclusive"
+    [[ $DURATION =~ ^[0-9]+$ ]] || die "--duration must be an integer"
+    (( BEST_EFFORT == 0 || STRICT_66 == 0 )) || die "choose strict or best-effort, not both"
+    if (( STRICT_66 )) && [[ $(uname -r) != 6.6* ]]; then
+        die "strict mode requires Linux 6.6"
+    fi
+    STATE_DIR=${STATE_DIR:-"$OUTPUT_DIR/state"}
+    mkdir -p "$OUTPUT_DIR" "$STATE_DIR"
+}
+
+collector_args() {
+    COLLECTOR_ARGS=(--machine-id 1 --backend duckdb --duckdb-directory "$OUTPUT_DIR" --duckdb-file "$DB_FILE")
+    COLLECTOR_ARGS+=(--platform-profile "$PLATFORM_PROFILE")
+    if (( BEST_EFFORT )); then COLLECTOR_ARGS+=(--best-effort); fi
+    if [[ -n $SUBSYSTEMS ]]; then COLLECTOR_ARGS+=(--subsystems "$SUBSYSTEMS"); fi
+    if [[ -n $REQUIRED_SUBSYSTEMS ]]; then COLLECTOR_ARGS+=(--required-subsystems "$REQUIRED_SUBSYSTEMS"); fi
+    if [[ -n $PIDS ]]; then
+        COLLECTOR_ARGS+=(--pids "$PIDS")
+    else
+        COLLECTOR_ARGS+=(--process-name "$PROCESS_NAME")
+    fi
+}
+
+collect_foreground() {
+    parse_collect_args "$@"
+    collector_args
+    preflight
+    root_command
+    note "db3=$OUTPUT_DIR/$DB_FILE"
+    if (( DURATION == 0 )); then
+        exec "${ROOT_CMD[@]}" env LD_LIBRARY_PATH="$LIB_DIR" "$COLLECTOR" "${COLLECTOR_ARGS[@]}"
+    fi
+
+    local collector_pid
+    "${ROOT_CMD[@]}" env LD_LIBRARY_PATH="$LIB_DIR" "$COLLECTOR" "${COLLECTOR_ARGS[@]}" \
+        >"$OUTPUT_DIR/collector.log" 2>&1 &
+    collector_pid=$!
+    trap 'stop_pid "$collector_pid" INT' INT TERM EXIT
+    sleep "$DURATION"
+    stop_pid "$collector_pid" INT
+    wait_for_exit "$collector_pid" || stop_pid "$collector_pid" TERM
+    wait "$collector_pid" 2>/dev/null || true
+    trap - INT TERM EXIT
+    [[ -s $OUTPUT_DIR/$DB_FILE ]] || die "DB3 was not created"
+    note "collection_complete=$OUTPUT_DIR/$DB_FILE"
+}
+
+start_background() {
+    parse_collect_args "$@"
+    collector_args
+    preflight
+    root_command
+    [[ ! -s $STATE_DIR/collector.pid ]] || die "state already exists: $STATE_DIR/collector.pid"
+    nohup "${ROOT_CMD[@]}" env LD_LIBRARY_PATH="$LIB_DIR" "$COLLECTOR" "${COLLECTOR_ARGS[@]}" \
+        >"$OUTPUT_DIR/collector.log" 2>&1 </dev/null &
+    local pid=$!
+    echo "$pid" >"$STATE_DIR/collector.pid"
+    printf 'output_dir=%s\ndb_file=%s\n' "$OUTPUT_DIR" "$DB_FILE" >"$STATE_DIR/collection.env"
+    note "collector_started=$pid"
+    note "state_dir=$STATE_DIR"
+    note "db3=$OUTPUT_DIR/$DB_FILE"
+}
+
+state_dir_arg() {
+    local state_dir="$DATA_DIR/current/state"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --state-dir) state_dir=$2; shift 2 ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
+    echo "$state_dir"
+}
+
+stop_background() {
+    local state_dir pid
+    state_dir=$(state_dir_arg "$@")
+    [[ -r $state_dir/collector.pid ]] || die "missing state file: $state_dir/collector.pid"
+    pid=$(<"$state_dir/collector.pid")
+    stop_pid "$pid" INT
+    if ! wait_for_exit "$pid"; then
+        stop_pid "$pid" TERM
+        wait_for_exit "$pid" || stop_pid "$pid" KILL
+    fi
+    rm -f "$state_dir/collector.pid"
+    note "collector_stopped=$pid"
+}
+
+status_background() {
+    local state_dir pid
+    state_dir=$(state_dir_arg "$@")
+    if [[ ! -r $state_dir/collector.pid ]]; then
+        note "status=stopped"
+        return 1
+    fi
+    pid=$(<"$state_dir/collector.pid")
+    root_command
+    if "${ROOT_CMD[@]}" kill -0 "$pid" 2>/dev/null; then
+        note "status=running pid=$pid"
+    else
+        note "status=stale pid=$pid"
+        return 1
+    fi
+}
+
+command=${1:-}
+[[ -n $command ]] || { usage; exit 1; }
+shift || true
+case "$command" in
+    preflight) preflight "$@" ;;
+    smoke) smoke "$@" ;;
+    collect) collect_foreground "$@" ;;
+    start) start_background "$@" ;;
+    stop) stop_background "$@" ;;
+    status) status_background "$@" ;;
+    -h|--help|help) usage ;;
+    *) die "unknown command: $command" ;;
+esac

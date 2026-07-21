@@ -1,0 +1,12 @@
+name = "generic-arm64"
+architecture = "aarch64"
+full_support_kernel = "6.6"
+best_effort_kernels = []
+capacity_headroom = 0.80
+core_events = [
+  "task-clock", "cycles", "instructions", "cache-references", "cache-misses",
+  "L1-dcache-loads", "L1-dcache-load-misses", "dTLB-loads", "dTLB-load-misses",
+  "context-switches", "cpu-migrations", "page-faults",
+]
+uncore_globs = []
+

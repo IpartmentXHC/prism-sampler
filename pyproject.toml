@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prism-sampler"
+version = "0.1.0"
+description = "Kunpeng-first telemetry collection and offline NUMA policy generation"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.0",
+  "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+excel = ["openpyxl>=3.1"]
+test = ["pytest>=8"]
+
+[project.scripts]
+prism-sampler = "prism_sampler.cli:main"
+prism-sampler-hook = "prism_sampler.hooks:main"
+prism-sampler-agent = "prism_sampler.agent:main"
+
+[tool.setuptools.packages.find]
+include = ["prism_sampler*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

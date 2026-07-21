@@ -1,0 +1,13 @@
+name = "kunpeng-920"
+architecture = "aarch64"
+full_support_kernel = "6.6"
+best_effort_kernels = ["5.10", "6.12"]
+capacity_headroom = 0.80
+core_events = [
+  "task-clock", "cycles", "instructions", "cache-references", "cache-misses",
+  "L1-dcache-loads", "L1-dcache-load-misses", "L2D_CACHE", "L2D_CACHE_REFILL",
+  "mem_access", "remote_access", "stall_frontend", "stall_backend",
+  "context-switches", "cpu-migrations", "page-faults",
+]
+uncore_globs = ["hisi_sccl*_ddrc*", "hisi_sccl*_hha*", "hisi_sccl*_l3c*"]
+

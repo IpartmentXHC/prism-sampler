@@ -1,0 +1,26 @@
+[experiment]
+output_root = "/data/threadState/experiments"
+system = "doris"
+
+[target]
+host = "kunpen183"
+sudo = "SUDO_ASKPASS=/absolute/path/to/askpass.sh sudo -A"
+remote_root = "/home/user/prism-sampler/data"
+agent_command = "/home/user/.local/bin/prism-sampler-agent"
+
+[client]
+host = "ubuntu197"
+
+[collector]
+binary = "/home/user/prism/bin/metric-collector"
+runtime_lib = "/home/user/prism/lib"
+attach_wait_seconds = 12
+stop_timeout_seconds = 30
+
+[yba]
+root = "/home/user/ycsb-bench-all-database"
+
+[sampling]
+profile = "policy"
+interval_seconds = 10
+platform = "kunpeng-920"
