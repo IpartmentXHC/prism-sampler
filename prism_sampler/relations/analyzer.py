@@ -57,6 +57,12 @@ def _range(con: Any, pids: list[int], warmup: float, tail: float,
         raise ValueError("taskstats_view contains no rows for the requested PID")
     selected_start = float(start) if start is not None else float(low) + warmup
     selected_end = float(end) if end is not None else float(high) - tail
+    if selected_start < float(low) or selected_end > float(high):
+        raise ValueError(
+            "analysis interval is outside taskstats range: "
+            f"requested=[{selected_start:.6f},{selected_end:.6f}] "
+            f"available=[{float(low):.6f},{float(high):.6f}]"
+        )
     if selected_end - selected_start < window_seconds:
         raise ValueError(
             f"analysis interval is too short: {selected_end-selected_start:.3f}s; "
@@ -500,8 +506,14 @@ def analyze_experiment(experiment: Path, *, window_seconds: int = 10) -> dict[st
             pids = [int(row["pid"]) for row in context_meta.get("target_processes", [])]
             if not pids:
                 raise ValueError("phase metadata has no target PID")
+            if context_meta.get("workload_clock") != "target_realtime":
+                raise ValueError("phase metadata has no target-realtime workload boundary")
             frames, context = _extract_frames(
-                db_path, pids, rules=[], warmup=0, tail=0, start=None, end=None,
+                db_path, pids, rules=[], warmup=0, tail=0,
+                start=(float(context_meta["workload_start_epoch_ns"]) / 1e9
+                       if context_meta.get("workload_start_epoch_ns") else None),
+                end=(float(context_meta["workload_end_epoch_ns"]) / 1e9
+                     if context_meta.get("workload_end_epoch_ns") else None),
                 window_seconds=window_seconds,
             )
             pairs = _pair_features(frames, context)
@@ -511,6 +523,20 @@ def analyze_experiment(experiment: Path, *, window_seconds: int = 10) -> dict[st
             pairs["round"] = round_number
             runs.append(pairs)
             _write_frames(run_dir / "features", {**frames, "pair_features": pairs})
+            run_summary = {
+                **context,
+                "phase": phase,
+                "round": round_number,
+                "workload_clock": context_meta["workload_clock"],
+                "target_clock_offset_ns": context_meta.get("target_clock_offset_ns"),
+                "target_clock_uncertainty_ns": context_meta.get(
+                    "target_clock_uncertainty_ns"
+                ),
+                "clock_offset_source": context_meta.get("clock_offset_source", "phase_probe"),
+            }
+            (run_dir / "features" / "run-summary.json").write_text(
+                json.dumps(run_summary, indent=2, sort_keys=True) + "\n"
+            )
         except Exception as exc:
             errors.append({"db": str(db_path), "error": f"{type(exc).__name__}: {exc}"})
     all_pairs = pd.concat(runs, ignore_index=True) if runs else pd.DataFrame()

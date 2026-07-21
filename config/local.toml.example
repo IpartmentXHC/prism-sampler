@@ -10,6 +10,9 @@ agent_command = "/home/user/.local/bin/prism-sampler-agent"
 
 [client]
 host = "ubuntu197"
+hook_command = "/home/user/.local/bin/prism-sampler-hook"
+sampler_config = "/home/user/.config/prism-sampler/local.toml"
+output_root = "/home/user/.local/share/prism-sampler/experiments"
 
 [collector]
 binary = "/home/user/prism/bin/metric-collector"

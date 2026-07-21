@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 
-from prism_sampler.relations.analyzer import GroupRule, analyze_db
+from prism_sampler.relations.analyzer import GroupRule, analyze_db, analyze_experiment
 
 
 def sample_db(path: Path) -> None:
@@ -92,7 +93,34 @@ class RelationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "too short"):
                 analyze_db(db, [10], warmup=30, tail=30)
 
+    def test_experiment_uses_target_clock_workload_bounds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "runs" / "load" / "r1"
+            db = run / "dataset" / "telemetry.db3"
+            db.parent.mkdir(parents=True)
+            (run / "meta").mkdir()
+            sample_db(db)
+            start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+            (run / "meta" / "phase.json").write_text(
+                json.dumps({
+                    "phase": "load",
+                    "round": 1,
+                    "target_processes": [{"pid": 10, "start_time": 1}],
+                    "workload_clock": "target_realtime",
+                    "workload_start_epoch_ns": int((start + 10) * 1e9),
+                    "workload_end_epoch_ns": int((start + 40) * 1e9),
+                    "target_clock_offset_ns": 123,
+                    "target_clock_uncertainty_ns": 10,
+                })
+            )
+            result = analyze_experiment(root, window_seconds=10)
+            self.assertEqual(result["runs"], 1)
+            self.assertEqual(result["errors"], 0)
+            summary = json.loads((run / "features" / "run-summary.json").read_text())
+            self.assertEqual(summary["duration_seconds"], 30)
+            self.assertEqual(summary["workload_clock"], "target_realtime")
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -140,6 +140,8 @@ def _communities(rows: pd.DataFrame, capacity: float, top_k: int) -> list[dict[s
             "groups": members,
             "cpu_demand": cpu_demand,
             "edge_score_sum": float(internal["relationship_score_r"].sum()),
+            "community_score": float(internal["relationship_score_r"].sum())
+            / max(len(members) * (len(members) - 1) / 2, 1),
             "strongest_edge_r": float(internal["relationship_score_r"].max()),
             "evidence_edges": internal[[
                 "group_a", "group_b", "relationship_score_r", "activity",
@@ -151,7 +153,7 @@ def _communities(rows: pd.DataFrame, capacity: float, top_k: int) -> list[dict[s
         key = tuple(candidate["groups"])
         unique[key] = candidate
     return sorted(
-        unique.values(), key=lambda row: (row["edge_score_sum"], row["strongest_edge_r"]),
+        unique.values(), key=lambda row: (row["community_score"], row["strongest_edge_r"]),
         reverse=True,
     )[:top_k]
 
@@ -191,7 +193,7 @@ def _policy(
 ) -> dict[str, Any]:
     remaining = sorted(node for node in topology if node != target_node)
     rules = [
-        {"group": group, "comm_regex": f"^{re.escape(group)}$", "nodes": [target_node]}
+        {"group": group, "comm_regex": _comm_regex(group), "nodes": [target_node]}
         for group in community["groups"]
     ]
     return {
@@ -212,6 +214,7 @@ def _policy(
         "capacity_limit": len(_expand_cpu_list(topology[target_node])) * 0.8,
         "relationship_evidence": {
             "edge_score_sum": community["edge_score_sum"],
+            "community_score": community["community_score"],
             "strongest_edge_r": community["strongest_edge_r"],
             "edges": community["evidence_edges"],
         },
@@ -252,7 +255,7 @@ def generate_policies(experiment: Path, *, top_k: int = 5) -> dict[str, Any]:
     policies.sort(
         key=lambda row: (
             row["scope"] == "robust",
-            row["relationship_evidence"]["edge_score_sum"],
+            row["relationship_evidence"]["community_score"],
             row["mode"] == "limited",
         ),
         reverse=True,
@@ -273,6 +276,10 @@ def generate_policies(experiment: Path, *, top_k: int = 5) -> dict[str, Any]:
     render_yba(output / "selected-policy.json", output / "yba-profile.env", enable=False)
     (output / "explanation.md").write_text(_explanation(selected))
     return {"candidates": len(policies), "selected": str(output / "selected-policy.json")}
+
+
+def _comm_regex(group: str) -> str:
+    return "^" + re.escape(group).replace(r"\ ", "[[:space:]]") + "$"
 
 
 def _toml(policy: dict[str, Any]) -> str:
@@ -350,6 +357,7 @@ def _explanation(policy: dict[str, Any]) -> str:
         f"- Target NUMA node: `{policy['target_nodes'][0]}`\n"
         f"- CPU demand: `{policy['cpu_demand']:.4f}` / `{policy['capacity_limit']:.4f}`\n"
         f"- Relationship edge score sum: `{evidence['edge_score_sum']:.4f}`\n\n"
+        f"- Community edge density: `{evidence['community_score']:.4f}`\n\n"
         "This output is candidate-only. G has not been calibrated, expected throughput gain is unknown, "
         "and the generated YBA profile remains disabled by default.\n"
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import shlex
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,6 +13,56 @@ from ..config import SamplerConfig
 from ..platform import PlatformReport, probe
 from ..remote import Host
 from ..sidecars import discover_uncore_events, select_core_events
+
+
+def measure_clock_offset(host: Host, samples: int = 5) -> dict[str, int]:
+    """Estimate target minus local realtime using the lowest-RTT SSH sample."""
+    if host.is_local:
+        now = time.time_ns()
+        return {
+            "target_clock_offset_ns": 0,
+            "target_clock_uncertainty_ns": 0,
+            "target_clock_rtt_ns": 0,
+            "clock_sample_local_realtime_ns": now,
+            "clock_sample_target_realtime_ns": now,
+        }
+    process = subprocess.Popen(
+        ["ssh", "-o", "BatchMode=yes", host.ssh, "bash", "--noprofile", "--norc"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    measurements = []
+    try:
+        process.stdin.write("printf 'prism-clock-ready\\n'\n")
+        process.stdin.flush()
+        if process.stdout.readline().strip() != "prism-clock-ready":
+            raise RuntimeError("target clock probe did not become ready")
+        for _ in range(samples):
+            local_before = time.time_ns()
+            process.stdin.write("date +%s%N\n")
+            process.stdin.flush()
+            target = int(process.stdout.readline().strip())
+            local_after = time.time_ns()
+            midpoint = (local_before + local_after) // 2
+            measurements.append({
+                "target_clock_offset_ns": target - midpoint,
+                "target_clock_uncertainty_ns": (local_after - local_before) // 2,
+                "target_clock_rtt_ns": local_after - local_before,
+                "clock_sample_local_realtime_ns": midpoint,
+                "clock_sample_target_realtime_ns": target,
+            })
+    finally:
+        try:
+            process.stdin.write("exit\n")
+            process.stdin.flush()
+        except BrokenPipeError:
+            pass
+        process.wait(timeout=10)
+    return min(measurements, key=lambda row: row["target_clock_rtt_ns"])
 
 
 @dataclass(frozen=True)
@@ -50,8 +101,27 @@ class CollectionSession:
         root = config.target["remote_root"].rstrip("/")
         self.remote_dir = f"{root}/{context.session_id}/{context.phase}/r{context.round}"
         self.report: PlatformReport | None = None
+        self.collector_cli_mode = "unknown"
+        self.clock: dict[str, int] = {}
+        self.collector_ready_target_realtime_ns: int | None = None
 
     def restore(self, health: dict[str, Any]) -> None:
+        self.collector_cli_mode = str(health.get("collector_cli_mode", "unknown"))
+        self.clock = {
+            key: int(health[key])
+            for key in (
+                "target_clock_offset_ns",
+                "target_clock_uncertainty_ns",
+                "target_clock_rtt_ns",
+                "clock_sample_local_realtime_ns",
+                "clock_sample_target_realtime_ns",
+            )
+            if health.get(key) is not None
+        }
+        if health.get("collector_ready_target_realtime_ns") is not None:
+            self.collector_ready_target_realtime_ns = int(
+                health["collector_ready_target_realtime_ns"]
+            )
         for row in health.get("plugins", []):
             name = str(row.get("name", ""))
             if name in self.status:
@@ -113,17 +183,25 @@ class CollectionSession:
         runtime = str(collector.get("runtime_lib", ""))
         env = f"LD_LIBRARY_PATH={shlex.quote(runtime)} " if runtime else ""
         pids = ",".join(str(pid) for pid in self.context.pids)
-        strict = bool(self.report and self.report.kernel.startswith("6.6"))
-        required = "taskstats,vfs,futex,iowait,net" if strict else "taskstats,futex,iowait"
-        requested = "taskstats,vfs,futex,iowait,aio,mux,net,discovery"
         args = (
             f"--machine-id 1 --pids {pids} --backend duckdb "
-            f"--duckdb-directory {shlex.quote(self.remote_dir)} --duckdb-file collector.db3 "
-            f"--platform-profile {'kunpeng' if self.report and self.report.profile == 'kunpeng' else 'generic-arm64'} "
-            f"--subsystems {requested} --required-subsystems {required}"
+            f"--duckdb-directory {shlex.quote(self.remote_dir)} --duckdb-file collector.db3"
         )
-        if not strict:
-            args += " --best-effort"
+        help_text = self.host.run(f"env {env}{binary} --help", check=False).stdout
+        if "--platform-profile" in help_text and "--subsystems" in help_text:
+            self.collector_cli_mode = "capability-aware"
+            strict = bool(self.report and self.report.kernel.startswith("6.6"))
+            required = "taskstats,vfs,futex,iowait,net" if strict else "taskstats,futex,iowait"
+            requested = "taskstats,vfs,futex,iowait,aio,mux,net,discovery"
+            args += (
+                f" --platform-profile "
+                f"{'kunpeng' if self.report and self.report.profile == 'kunpeng' else 'generic-arm64'}"
+                f" --subsystems {requested} --required-subsystems {required}"
+            )
+            if not strict:
+                args += " --best-effort"
+        else:
+            self.collector_cli_mode = "legacy"
         self._start_process("prism", self._prefix(f"env {env}{binary} {args}"))
         time.sleep(float(self.config.collector.get("attach_wait_seconds", 12)))
         self._validate_pids()
@@ -157,7 +235,8 @@ class CollectionSession:
 
     def _start_perf_uncore(self) -> None:
         patterns = self.config.values["platform"].get("uncore_globs", [])
-        events = discover_uncore_events(self.host, patterns)
+        event_names = self.config.values["platform"].get("uncore_event_names", [])
+        events = discover_uncore_events(self.host, patterns, event_names)
         status = self.status["perf-uncore"]
         if not events:
             status.error = "no configured uncore PMU events are available"
@@ -203,6 +282,10 @@ class CollectionSession:
             missing = [name for name in self.required if not self.status[name].healthy]
             if missing:
                 raise RuntimeError("required collectors are unhealthy: " + ", ".join(missing))
+            self.clock = measure_clock_offset(self.host)
+            self.collector_ready_target_realtime_ns = (
+                time.time_ns() + self.clock["target_clock_offset_ns"]
+            )
         except Exception:
             self.stop(copy=False)
             raise
@@ -220,7 +303,7 @@ class CollectionSession:
         )
 
     def health(self, state: str) -> dict[str, Any]:
-        return {
+        health = {
             "schema": "prism-sampler.health.v1",
             "session_id": self.context.session_id,
             "phase": self.context.phase,
@@ -229,10 +312,16 @@ class CollectionSession:
             "realtime_ns": time.time_ns(),
             "monotonic_ns": time.monotonic_ns(),
             "profile": self.profile,
+            "collector_cli_mode": self.collector_cli_mode,
             "pids": list(self.context.pids),
             "platform": self.report.to_dict() if self.report else None,
             "plugins": [asdict(self.status[name]) for name in self.requested],
         }
+        health.update(self.clock)
+        health["collector_ready_target_realtime_ns"] = (
+            self.collector_ready_target_realtime_ns
+        )
+        return health
 
     def stop(self, *, copy: bool = True) -> dict[str, Any]:
         for name in reversed(self.requested):
@@ -244,6 +333,23 @@ class CollectionSession:
                 timeout_seconds=int(self.config.collector.get("stop_timeout_seconds", 30)),
                 command_prefix=self.sudo,
             )
+        expected = {
+            "prism": "collector.db3",
+            "snapshot": "system-pressure.jsonl",
+            "perf-core": "perf-core.csv",
+            "perf-uncore": "perf-uncore.csv",
+            "arm-spe": "arm-spe.data",
+        }
+        for name, filename in expected.items():
+            status = self.status.get(name)
+            if not status or not status.started:
+                continue
+            exists = self.host.run(
+                f"test -s {shlex.quote(self.remote_dir + '/' + filename)}", check=False
+            ).returncode == 0
+            if not exists:
+                status.healthy = False
+                status.error = f"expected artifact is missing or empty: {filename}"
         health = self.health("stopped")
         try:
             self._write_remote_json("health.json", health)

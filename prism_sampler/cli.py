@@ -6,8 +6,9 @@ import time
 from pathlib import Path
 
 from .collectors import CollectionSession, SessionContext
+from .artifacts import finalize_run
 from .config import load_config, read_toml
-from .deploy import build_bundle, install_bundle, smoke_bundle
+from .deploy import build_bundle, install_bundle, install_client, smoke_bundle
 from .hooks import handle
 from .orchestration import preflight, run_yba
 from .platform import probe, write_report
@@ -91,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--host", required=True)
     install.add_argument("--bundle", required=True, type=Path)
     install.add_argument("--install-dir", default=".local/prism-sampler")
+    install_client_parser = deploy_sub.add_parser("install-client")
+    install_client_parser.add_argument("--host", required=True)
+    install_client_parser.add_argument("--install-dir", default="/home/xhc/.local/src/prism-sampler")
+    install_client_parser.add_argument("--config", type=Path)
     dsmoke = deploy_sub.add_parser("smoke")
     dsmoke.add_argument("--host", required=True)
     dsmoke.add_argument("--install-dir", default=".local/prism-sampler")
@@ -120,11 +125,30 @@ def main() -> None:
         output = args.output or Path(config.section("experiment").get("output_root", ".")) / "smoke"
         context = SessionContext("smoke", "smoke", 1, tuple(args.pid), starts, output)
         session = CollectionSession(config, context)
+        phase_context = {
+            "schema": "prism-sampler.smoke.v1", "run_id": "smoke", "phase": "smoke",
+            "round": 1, "target_processes": [
+                {"pid": pid, "start_time": starts[pid]} for pid in args.pid
+            ],
+            "events": [{
+                "event": "phase_before", "realtime_ns": time.time_ns(),
+                "monotonic_ns": time.monotonic_ns(),
+            }],
+        }
+        (output / "meta").mkdir(parents=True, exist_ok=True)
         print(json.dumps(session.start(), indent=2, sort_keys=True))
         try:
             time.sleep(args.duration)
         finally:
             print(json.dumps(session.stop(), indent=2, sort_keys=True))
+        phase_context["events"].append({
+            "event": "phase_after", "realtime_ns": time.time_ns(),
+            "monotonic_ns": time.monotonic_ns(),
+        })
+        (output / "meta" / "phase.json").write_text(
+            json.dumps(phase_context, indent=2, sort_keys=True) + "\n"
+        )
+        print(json.dumps(finalize_run(output, phase_context), indent=2, sort_keys=True))
     elif args.command == "analyze" and args.analyze_command == "db":
         print(json.dumps(analyze_db(
             args.db, args.pid, output=args.output, rules=_rules(args.group_rules),
@@ -145,6 +169,8 @@ def main() -> None:
                            source_root=args.source_root, runtime_libs=args.runtime_lib))
     elif args.command == "deploy" and args.deploy_command == "install":
         install_bundle(Host(args.host), args.bundle, args.install_dir)
+    elif args.command == "deploy" and args.deploy_command == "install-client":
+        install_client(Host(args.host), args.install_dir, args.config)
     elif args.command == "deploy":
         smoke_bundle(Host(args.host), args.install_dir, best_effort=args.best_effort, sudo=args.sudo)
 

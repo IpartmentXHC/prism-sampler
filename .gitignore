@@ -6,6 +6,8 @@ build/
 dist/
 *.egg-info/
 config/local.toml
+config/client.toml
+config/clickhouse.toml
 *.db3
 *.db3.wal
 *.xlsx
@@ -15,4 +17,3 @@ config/local.toml
 *.tar.gz.sha256
 data/
 experiments/
-

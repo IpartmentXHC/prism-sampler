@@ -77,7 +77,11 @@ def build_bundle(
         for name in ("prismctl", "capability-probe", "README.md"):
             shutil.copy2(PORTABLE_ROOT / name, stage / name)
         package_root = stage / "python" / "prism_sampler"
-        shutil.copytree(REPO_ROOT / "prism_sampler", package_root)
+        shutil.copytree(
+            REPO_ROOT / "prism_sampler",
+            package_root,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
         agent = stage / "bin" / "prism-sampler-agent"
         agent.write_text(
             "#!/usr/bin/env bash\n"
@@ -99,7 +103,7 @@ def build_bundle(
             "collector_sha256": _sha256(target),
             "profiles": ["kunpeng", "generic-arm64"],
             "full_support_kernel": "6.6",
-            "best_effort_kernel": "5.10",
+            "best_effort_kernels": ["5.10", "6.12"],
             "agent": "bin/prism-sampler-agent",
         }
         (stage / "manifest.json").write_text(
@@ -132,6 +136,55 @@ def install_bundle(host: Host, bundle: Path, install_dir: str) -> None:
         f"&& chmod +x {install}/prismctl {install}/capability-probe "
         f"{install}/bin/metric-collector {install}/bin/prism-sampler-agent"
     )
+
+
+def install_client(host: Host, install_dir: str, config: Path | None = None) -> None:
+    with tempfile.TemporaryDirectory(prefix="prism-sampler-client-") as temporary:
+        archive = Path(temporary) / "prism-sampler-source.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            for name in ("pyproject.toml", "README.md", "collector.lock", "config"):
+                bundle.add(REPO_ROOT / name, arcname=f"prism-sampler/{name}")
+            for source in sorted((REPO_ROOT / "prism_sampler").rglob("*")):
+                if (
+                    source.is_file()
+                    and source.suffix != ".pyc"
+                    and "__pycache__" not in source.parts
+                ):
+                    bundle.add(
+                        source,
+                        arcname=f"prism-sampler/{source.relative_to(REPO_ROOT)}",
+                    )
+        remote_archive = "/tmp/prism-sampler-source.tar.gz"
+        host.copy_to(archive, remote_archive)
+        host.run(
+            f"mkdir -p {shlex.quote(install_dir)} && "
+            f"tar -xzf {remote_archive} -C {shlex.quote(install_dir)} --strip-components=1 && "
+            "python3 -m pip install --user 'duckdb>=1.0' 'tomli>=2.0'"
+        )
+        launcher_dir = Path(temporary) / "bin"
+        launcher_dir.mkdir()
+        for name, module in (
+            ("prism-sampler", "prism_sampler.cli"),
+            ("prism-sampler-hook", "prism_sampler.hooks"),
+            ("prism-sampler-agent", "prism_sampler.agent"),
+        ):
+            launcher = launcher_dir / name
+            launcher.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f"export PYTHONPATH={shlex.quote(install_dir)}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+                f"exec python3 -m {module} \"$@\"\n",
+                encoding="utf-8",
+            )
+            remote_launcher = f"{host.run('printf %s \"$HOME\"').stdout.strip()}/.local/bin/{name}"
+            host.run(f"mkdir -p {shlex.quote(str(Path(remote_launcher).parent))}")
+            host.copy_to(launcher, remote_launcher)
+            host.run(f"chmod +x {shlex.quote(remote_launcher)}")
+    if config:
+        home = host.run("printf '%s' \"$HOME\"").stdout.strip()
+        remote_config = f"{home}/.config/prism-sampler/local.toml"
+        host.run(f"mkdir -p {shlex.quote(home + '/.config/prism-sampler')}")
+        host.copy_to(config, remote_config)
 
 
 def smoke_bundle(host: Host, install_dir: str, *, best_effort: bool = False, sudo: str = "") -> None:

@@ -23,9 +23,11 @@ copy the analysis UI or modify upstream ownership boundaries.
 2. Validate target PID and `/proc/PID/stat` start time.
 3. Start required plugins, then optional plugins, and publish health state.
 4. Return from `phase_before`; YBA starts workload timing.
-5. Capture target-local realtime and monotonic timestamps throughout the phase.
+5. Measure the target/client clock offset and capture target-local realtime and
+   monotonic timestamps throughout the phase.
 6. Stop in reverse order, copy raw files, and preserve raw DB3 unchanged.
-7. Build `telemetry.db3`, validate required tables, then analyze relationships.
+7. Build `telemetry.db3`, validate required tables, then analyze only the exact
+   target-clock workload interval.
 
 Hook and stop operations are idempotent. Required plugin failure prevents the
 workload; optional failure is recorded in capabilities and health artifacts.
@@ -36,4 +38,3 @@ workload; optional failure is recorded in capabilities and health artifacts.
 - `relationship`: Prism futex/VFS/taskstats plus local placement snapshots.
 - `policy`: relationship data, core/uncore perf, NUMA, PSI, runqueue evidence.
 - `diagnostic`: policy profile plus opt-in ARM SPE.
-

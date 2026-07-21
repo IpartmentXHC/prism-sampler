@@ -9,6 +9,36 @@ from typing import Any
 from .sidecars import merge_sidecars, parse_numa_maps, parse_numastat, parse_thread_placement
 
 
+def _duckdb_timestamp(epoch_seconds: float) -> datetime:
+    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).replace(tzinfo=None)
+
+
+def validate_raw(run_dir: Path) -> dict[str, Any]:
+    import duckdb
+
+    db = run_dir / "raw" / "collector.db3"
+    if not db.is_file() or db.stat().st_size == 0:
+        raise RuntimeError(f"collector DB3 is missing or empty: {db}")
+    con = duckdb.connect(str(db), read_only=True)
+    tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
+    counts = {
+        table: int(con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
+        for table in ("taskstats", "taskstats_view", "futex_wait", "futex_wake", "vfs")
+        if table in tables
+    }
+    con.close()
+    if counts.get("taskstats", 0) <= 0 or counts.get("taskstats_view", 0) <= 0:
+        raise RuntimeError("collector DB3 has no taskstats samples")
+    value = {
+        "schema": "prism-sampler.raw-health.v1", "raw_db": str(db),
+        "raw_db_sha256": sha256(db), "table_rows": counts,
+    }
+    meta = run_dir / "meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    (meta / "raw-health.json").write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    return value
+
+
 def _agent_snapshots(db_path: Path, snapshot_path: Path) -> dict[str, int]:
     import duckdb
 
@@ -30,45 +60,58 @@ def _agent_snapshots(db_path: Path, snapshot_path: Path) -> dict[str, int]:
         );
         """
     )
+    system_rows = []
+    numa_rows = []
+    placement_rows = []
     for line in snapshot_path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.strip():
             continue
         sample = json.loads(line)
-        ts = datetime.fromtimestamp(float(sample["realtime_ns"]) / 1e9, tz=timezone.utc)
+        ts = _duckdb_timestamp(float(sample["realtime_ns"]) / 1e9)
         mono = int(sample["monotonic_ns"])
         for metric in (
             "loadavg", "proc_stat", "schedstat", "pressure_cpu", "pressure_memory", "pressure_io"
         ):
-            con.execute(
-                "INSERT INTO system_pressure_samples VALUES (?, ?, ?, ?)",
-                [ts, mono, metric, sample.get(metric, "")],
-            )
-            counts["system_pressure_samples"] += 1
+            system_rows.append({
+                "ts": ts, "monotonic_ns": mono, "metric": metric,
+                "value": sample.get(metric, ""),
+            })
         for process in sample.get("processes", []):
             pid = int(process["pid"])
             for node, value in parse_numastat(process.get("numastat", "")).items():
-                con.execute(
-                    "INSERT INTO numa_samples VALUES (?, ?, ?, 'resident', ?, 'MB')",
-                    [ts, pid, node, value],
-                )
-                counts["numa_samples"] += 1
+                numa_rows.append({
+                    "ts": ts, "pid": pid, "node": node, "metric": "resident",
+                    "value": value, "unit": "MB",
+                })
             for node, value in parse_numa_maps(process.get("numa_maps", "")).items():
-                con.execute(
-                    "INSERT INTO numa_samples VALUES (?, ?, ?, 'mapped', ?, 'pages')",
-                    [ts, pid, node, value],
-                )
-                counts["numa_samples"] += 1
+                numa_rows.append({
+                    "ts": ts, "pid": pid, "node": node, "metric": "mapped",
+                    "value": value, "unit": "pages",
+                })
             for thread in parse_thread_placement(
                 process.get("threads", ""),
                 {int(cpu): int(node) for cpu, node in sample.get("cpu_nodes", {}).items()},
                 process.get("affinity", ""),
             ):
-                con.execute(
-                    "INSERT INTO thread_placement_samples VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [ts, thread["pid"], thread["tid"], thread["comm"], thread["cpu"],
-                     thread["numa_node"], thread["affinity"]],
-                )
-                counts["thread_placement_samples"] += 1
+                placement_rows.append({
+                    "ts": ts, "pid": thread["pid"], "tid": thread["tid"],
+                    "comm": thread["comm"], "cpu": thread["cpu"],
+                    "numa_node": thread["numa_node"], "affinity": thread["affinity"],
+                })
+    import pandas as pd
+
+    for table, rows in (
+        ("system_pressure_samples", system_rows),
+        ("numa_samples", numa_rows),
+        ("thread_placement_samples", placement_rows),
+    ):
+        if not rows:
+            continue
+        frame = pd.DataFrame(rows)
+        con.register("snapshot_frame", frame)
+        con.execute(f'INSERT INTO "{table}" SELECT * FROM snapshot_frame')
+        con.unregister("snapshot_frame")
+        counts[table] = len(rows)
     con.close()
     return counts
 
@@ -83,6 +126,7 @@ def finalize_run(run_dir: Path, phase_context: dict[str, Any]) -> dict[str, Any]
     target = dataset / "telemetry.db3"
     if not source.is_file() or source.stat().st_size == 0:
         raise RuntimeError(f"collector DB3 is missing or empty: {source}")
+    Path(str(target) + ".wal").unlink(missing_ok=True)
     shutil.copy2(source, target)
     perf_files = []
     for name, scope in (("perf-core.csv", "process"), ("perf-uncore.csv", "system")):

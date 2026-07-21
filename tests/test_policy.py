@@ -37,6 +37,7 @@ class PolicyTest(unittest.TestCase):
             self.assertFalse(selected["apply_allowed"])
             self.assertIsNone(selected["expected_gain"])
             self.assertLessEqual(selected["cpu_demand"], selected["capacity_limit"])
+            self.assertEqual(selected["groups"], ["a", "b"])
             env = (experiment / "policy/yba-profile.env").read_text()
             self.assertIn("ENABLE_THREAD_CLUSTER=0", env)
             self.assertGreater(result["candidates"], 0)
@@ -44,4 +45,3 @@ class PolicyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

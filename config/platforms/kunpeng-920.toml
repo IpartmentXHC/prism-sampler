@@ -10,4 +10,9 @@ core_events = [
   "context-switches", "cpu-migrations", "page-faults",
 ]
 uncore_globs = ["hisi_sccl*_ddrc*", "hisi_sccl*_hha*", "hisi_sccl*_l3c*"]
-
+uncore_event_names = [
+  "flux_rd", "flux_wr",
+  "rx_sccl", "rx_outer", "rd_ddr_64b", "rd_ddr_128b", "wr_ddr_64b", "wr_ddr_128b",
+  "rd_cpipe", "rd_hit_cpipe", "rd_spipe", "rd_hit_spipe",
+  "wr_cpipe", "wr_hit_cpipe", "wr_spipe", "wr_hit_spipe", "victim_num",
+]

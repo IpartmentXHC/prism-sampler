@@ -15,6 +15,10 @@ from typing import Any, Iterable
 from .remote import Host
 
 
+def _duckdb_timestamp(epoch_seconds: float) -> datetime:
+    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).replace(tzinfo=None)
+
+
 def _number(value: object) -> float | None:
     text = str(value).strip().replace(" ", "")
     if not text or text.startswith("<not") or text.lower() in {"nan", "n/a"}:
@@ -100,20 +104,32 @@ def select_core_events(candidates: Iterable[str], available: Iterable[str]) -> l
     return list(dict.fromkeys(selected))
 
 
-def discover_uncore_events(host: Host, globs: Iterable[str]) -> list[str]:
-    pmus = host.run(
-        "find /sys/bus/event_source/devices -mindepth 1 -maxdepth 1 -printf '%f\\n' 2>/dev/null",
+def discover_uncore_events(
+    host: Host, globs: Iterable[str], event_names: Iterable[str] = ()
+) -> list[str]:
+    rows = host.run(
+        "find -L /sys/bus/event_source/devices -path '*/events/*' -type f "
+        "-printf '%h|%f\\n' 2>/dev/null",
         check=False,
     ).stdout.splitlines()
-    selected = [pmu for pmu in pmus if any(fnmatch.fnmatch(pmu, pattern) for pattern in globs)]
     events: list[str] = []
-    for pmu in sorted(selected):
-        names = host.run(
-            f"find /sys/bus/event_source/devices/{pmu}/events -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null",
-            check=False,
-        ).stdout.splitlines()
-        events.extend(f"{pmu}/{name}/" for name in names if name)
-    return events
+    allowed = set(event_names)
+    for row in rows:
+        if "|" not in row:
+            continue
+        directory, name = row.split("|", 1)
+        parts = Path(directory).parts
+        try:
+            pmu = parts[parts.index("devices") + 1]
+        except (ValueError, IndexError):
+            continue
+        if (
+            name
+            and any(fnmatch.fnmatch(pmu, pattern) for pattern in globs)
+            and (not allowed or name in allowed)
+        ):
+            events.append(f"{pmu}/{name}/")
+    return sorted(set(events))
 
 
 def derived_pmu_metrics(samples: Iterable[PerfSample], interval_seconds: float) -> list[dict[str, Any]]:
@@ -327,33 +343,47 @@ def merge_sidecars(
         """
     )
     counts = {"pmu_samples": 0, "pmu_derived": 0, "numa_samples": 0, "thread_placement_samples": 0}
+    perf_rows = []
+    derived_rows = []
     for path, scope, start_epoch in perf_files:
         if not path.is_file():
             continue
         samples = parse_perf_stat(path.read_text(encoding="utf-8", errors="replace"), scope)
         for sample in samples:
-            ts = datetime.fromtimestamp(start_epoch + sample.interval_s, tz=timezone.utc)
-            con.execute(
-                "INSERT INTO pmu_samples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [ts, sample.interval_s, sample.scope, sample.pmu, sample.event, sample.value,
-                 sample.unit, sample.scale, sample.time_enabled, sample.time_running],
-            )
-            counts["pmu_samples"] += 1
+            ts = _duckdb_timestamp(start_epoch + sample.interval_s)
+            perf_rows.append({
+                "ts": ts, "interval_s": sample.interval_s, "scope": sample.scope,
+                "pmu": sample.pmu, "event": sample.event, "raw_value": sample.value,
+                "unit": sample.unit, "scale": sample.scale,
+                "time_enabled": sample.time_enabled, "time_running": sample.time_running,
+            })
         intervals = sorted({sample.interval_s for sample in samples})
         interval = intervals[1] - intervals[0] if len(intervals) > 1 else 10.0
         for row in derived_pmu_metrics(samples, interval):
-            ts = datetime.fromtimestamp(start_epoch + float(row["interval_s"]), tz=timezone.utc)
-            con.execute(
-                "INSERT INTO pmu_derived VALUES (?, ?, ?, ?, ?)",
-                [ts, row["interval_s"], row["scope"], row["metric"], row["value"]],
-            )
-            counts["pmu_derived"] += 1
+            ts = _duckdb_timestamp(start_epoch + float(row["interval_s"]))
+            derived_rows.append({"ts": ts, **row})
+    if perf_rows:
+        import pandas as pd
+
+        frame = pd.DataFrame(perf_rows)
+        con.register("perf_frame", frame)
+        con.execute("INSERT INTO pmu_samples SELECT * FROM perf_frame")
+        con.unregister("perf_frame")
+        counts["pmu_samples"] = len(perf_rows)
+    if derived_rows:
+        import pandas as pd
+
+        frame = pd.DataFrame(derived_rows)[["ts", "interval_s", "scope", "metric", "value"]]
+        con.register("derived_frame", frame)
+        con.execute("INSERT INTO pmu_derived SELECT * FROM derived_frame")
+        con.unregister("derived_frame")
+        counts["pmu_derived"] = len(derived_rows)
     if snapshot_file and snapshot_file.is_file():
         for line in snapshot_file.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             sample = json.loads(line)
-            ts = datetime.fromtimestamp(float(sample["epoch"]), tz=timezone.utc)
+            ts = _duckdb_timestamp(float(sample["epoch"]))
             for node, value in sample.get("numastat_mb", {}).items():
                 con.execute("INSERT INTO numa_samples VALUES (?, ?, ?, 'resident', ?, 'MB')", [ts, sample["pid"], int(node), value])
                 counts["numa_samples"] += 1

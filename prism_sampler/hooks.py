@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .artifacts import finalize_run
+from .artifacts import validate_raw
 from .collectors import CollectionSession, SessionContext
 from .config import CONFIG_ROOT, SamplerConfig, load_config, read_toml
 from .remote import Host
@@ -98,6 +98,23 @@ def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
         )
         collector = CollectionSession(config, session_context)
         health = collector.start()
+        for key in (
+            "target_clock_offset_ns",
+            "target_clock_uncertainty_ns",
+            "target_clock_rtt_ns",
+            "clock_sample_local_realtime_ns",
+            "clock_sample_target_realtime_ns",
+            "collector_ready_target_realtime_ns",
+        ):
+            if health.get(key) is not None:
+                phase_context[key] = health[key]
+        phase_context.setdefault("events", []).append({
+            "event": "collector_ready",
+            "realtime_ns": time.time_ns(),
+            "monotonic_ns": time.monotonic_ns(),
+            "target_realtime_ns": health.get("collector_ready_target_realtime_ns"),
+        })
+        phase_path.write_text(json.dumps(phase_context, indent=2, sort_keys=True) + "\n")
         state = {
             "config": str(config_path.resolve()),
             "context": {
@@ -128,7 +145,7 @@ def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
         collector.restore(state["health"])
         collector.stop(copy=True)
         phase_context = _append_event(phase_path, "collector_stopped", context)
-        health = finalize_run(run_dir, phase_context)
+        health = validate_raw(run_dir)
         state_path.unlink(missing_ok=True)
         return {"event": event, "status": "complete", "run_dir": str(run_dir), "health": health}
     if event in {"run_abort", "cleanup"}:
