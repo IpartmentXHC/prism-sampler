@@ -13,6 +13,9 @@ runs/<phase>/r<round>/
 `raw/collector.db3` and sidecars are immutable evidence. `telemetry.db3` is a
 copy enriched with `pmu_samples`, `pmu_derived`, `numa_samples`,
 `thread_placement_samples`, `system_pressure_samples`, and `phase_markers`.
+YBA's authoritative phase and per-operation results are imported as
+`yba_phase_kpi` and `yba_operation_kpi`; `meta/kpi.json` records source paths
+and checksums.
 
 PMU rows retain raw value, unit, scope, scale, time-enabled, and time-running.
 Every local sampler row carries realtime and monotonic timestamps. At each

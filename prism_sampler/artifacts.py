@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 from datetime import datetime, timezone
@@ -174,6 +175,98 @@ def finalize_run(run_dir: Path, phase_context: dict[str, Any]) -> dict[str, Any]
     }
     (meta / "health.json").write_text(json.dumps(health, indent=2, sort_keys=True) + "\n")
     return health
+
+
+def import_yba_kpi(run_dir: Path, phase_dir: Path) -> dict[str, Any]:
+    """Import authoritative YBA phase KPIs into the derived telemetry DB."""
+    import duckdb
+    import pandas as pd
+
+    telemetry = run_dir / "dataset" / "telemetry.db3"
+    summary_path = phase_dir / "summary.csv"
+    operation_path = phase_dir / "operation-summary.csv"
+    if not telemetry.is_file() or not summary_path.is_file():
+        raise RuntimeError(f"YBA KPI import inputs are missing for {run_dir}")
+
+    with summary_path.open(newline="", encoding="utf-8") as stream:
+        phase_rows = list(csv.DictReader(stream))
+    if len(phase_rows) != 1:
+        raise RuntimeError(f"expected one YBA phase summary row: {summary_path}")
+    operation_rows: list[dict[str, str]] = []
+    if operation_path.is_file():
+        with operation_path.open(newline="", encoding="utf-8") as stream:
+            operation_rows = list(csv.DictReader(stream))
+
+    phase = phase_rows[0]
+    phase_frame = pd.DataFrame([{
+        "phase": phase.get("label", ""),
+        "clients": int(float(phase.get("clients") or 0)),
+        "threads_per_client": int(float(phase.get("threads_per_client") or 0)),
+        "total_threads": int(float(phase.get("total_threads") or 0)),
+        "operations": float(phase.get("read_ops") or 0),
+        "throughput_ops_s": float(phase.get("throughput") or 0),
+        "runtime_seconds": float(phase.get("runtime_ms_max") or 0) / 1000.0,
+        "avg_latency_us": float(phase.get("avg_latency") or 0),
+        "p95_latency_us": float(phase.get("p95_latency") or 0),
+        "p99_latency_us": float(phase.get("p99_latency") or 0),
+        "p999_latency_us": float(phase.get("p999_latency") or 0),
+        "error_count": float(phase.get("error_count") or 0),
+        "timeout_count": float(phase.get("timeout_count") or 0),
+    }])
+    operation_frame = pd.DataFrame([{
+        "phase": row.get("label", ""),
+        "operation": row.get("operation", ""),
+        "operations": float(row.get("operations") or 0),
+        "avg_latency_us": float(row.get("avg_latency") or 0),
+        "p95_latency_us": float(row.get("p95_latency") or 0),
+        "p99_latency_us": float(row.get("p99_latency") or 0),
+        "p999_latency_us": float(row.get("p999_latency") or 0),
+        "error_count": float(row.get("error_count") or 0),
+    } for row in operation_rows])
+
+    con = duckdb.connect(str(telemetry))
+    con.register("phase_kpi_frame", phase_frame)
+    con.execute("CREATE OR REPLACE TABLE yba_phase_kpi AS SELECT * FROM phase_kpi_frame")
+    con.unregister("phase_kpi_frame")
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE yba_operation_kpi (
+          phase VARCHAR, operation VARCHAR, operations DOUBLE,
+          avg_latency_us DOUBLE, p95_latency_us DOUBLE, p99_latency_us DOUBLE,
+          p999_latency_us DOUBLE, error_count DOUBLE
+        )
+        """
+    )
+    if not operation_frame.empty:
+        con.register("operation_kpi_frame", operation_frame)
+        con.execute("INSERT INTO yba_operation_kpi SELECT * FROM operation_kpi_frame")
+        con.unregister("operation_kpi_frame")
+    con.close()
+
+    report = {
+        "schema": "prism-sampler.yba-kpi.v1",
+        "phase": phase.get("label", ""),
+        "phase_rows": 1,
+        "operation_rows": len(operation_rows),
+        "sources": {
+            "summary": {"path": str(summary_path), "sha256": sha256(summary_path)},
+            "operations": (
+                {"path": str(operation_path), "sha256": sha256(operation_path)}
+                if operation_path.is_file() else None
+            ),
+        },
+    }
+    meta = run_dir / "meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    (meta / "kpi.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    health_path = meta / "health.json"
+    if health_path.is_file():
+        health = json.loads(health_path.read_text())
+        health["yba_kpi"] = {"phase_rows": 1, "operation_rows": len(operation_rows)}
+        health.setdefault("table_rows", {})["yba_phase_kpi"] = 1
+        health["table_rows"]["yba_operation_kpi"] = len(operation_rows)
+        health_path.write_text(json.dumps(health, indent=2, sort_keys=True) + "\n")
+    return report
 
 
 def sha256(path: Path) -> str:

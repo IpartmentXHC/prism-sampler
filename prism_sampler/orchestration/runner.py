@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import SamplerConfig, validate_config
-from ..artifacts import finalize_run
+from ..artifacts import finalize_run, import_yba_kpi
 from ..collectors.session import measure_clock_offset
 from ..platform import probe
 from ..remote import Host
@@ -113,6 +113,12 @@ def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
                         phase.update(_target_workload_bounds(bounds, phase))
                         phase_path.write_text(json.dumps(phase, indent=2, sort_keys=True) + "\n")
                     finalize_run(run_dir, phase)
+                    phase_dirs = sorted(yba_output.glob(f"phases/*-{phase.get('phase', '')}"))
+                    if len(phase_dirs) != 1:
+                        raise RuntimeError(
+                            f"expected one YBA output directory for phase {phase.get('phase', '')}"
+                        )
+                    import_yba_kpi(run_dir, phase_dirs[0])
     return returncode
 
 
