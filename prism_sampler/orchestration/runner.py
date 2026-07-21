@@ -98,6 +98,7 @@ def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
     ).returncode
     client_output = str(client.get("output_root", "")).rstrip("/")
     client_host = str(client.get("host", ""))
+    finalized_runs = 0
     if client_output and client_host:
         remote = f"{client_output}/{system}/{run_id}"
         if Host(client_host).run(f"test -d {shlex.quote(remote)}", check=False).returncode == 0:
@@ -119,6 +120,9 @@ def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
                             f"expected one YBA output directory for phase {phase.get('phase', '')}"
                         )
                     import_yba_kpi(run_dir, phase_dirs[0])
+                    finalized_runs += 1
+    if finalized_runs:
+        _postprocess_experiment(experiment_root, finalized_runs, yba_returncode=returncode)
     return returncode
 
 
@@ -150,3 +154,47 @@ def _target_workload_bounds(
         "workload_end_epoch_ns": end + offset,
         "workload_clock": "target_realtime",
     }
+
+
+def _postprocess_experiment(
+    experiment: Path, finalized_runs: int, *, yba_returncode: int
+) -> dict[str, Any]:
+    from ..policies import generate_policies
+    from ..relations import analyze_experiment
+
+    summary = experiment / "summary"
+    summary.mkdir(parents=True, exist_ok=True)
+    status: dict[str, Any] = {
+        "schema": "prism-sampler.postprocess.v1",
+        "finalized_runs": finalized_runs,
+        "status": "complete",
+    }
+    try:
+        analysis = analyze_experiment(experiment)
+        status["analysis"] = analysis
+        if analysis["errors"]:
+            raise RuntimeError(f"relationship analysis failed for {analysis['errors']} run(s)")
+        if analysis["runs"] != finalized_runs:
+            raise RuntimeError(
+                f"analyzed {analysis['runs']} of {finalized_runs} finalized run(s)"
+            )
+        if analysis["candidates"]:
+            status["policy"] = generate_policies(experiment)
+        else:
+            status["policy"] = {
+                "status": "skipped",
+                "reason": "no eligible futex or VFS relationship candidates",
+            }
+    except Exception as exc:
+        status["status"] = "failed"
+        status["error"] = f"{type(exc).__name__}: {exc}"
+        (summary / "postprocess.json").write_text(
+            json.dumps(status, indent=2, sort_keys=True) + "\n"
+        )
+        if yba_returncode == 0:
+            raise
+        return status
+    (summary / "postprocess.json").write_text(
+        json.dumps(status, indent=2, sort_keys=True) + "\n"
+    )
+    return status

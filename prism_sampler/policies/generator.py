@@ -49,17 +49,28 @@ def _topology(experiment: Path) -> dict[int, str]:
 def _node_pressure(experiment: Path, topology: dict[int, str]) -> dict[int, float]:
     import duckdb
 
-    samples: list[dict[int, tuple[int, int]]] = []
+    per_run: list[dict[int, float]] = []
     for db in sorted(experiment.glob("runs/**/dataset/telemetry.db3")):
+        phase_path = db.parents[1] / "meta" / "phase.json"
+        if not phase_path.is_file():
+            continue
+        phase = json.loads(phase_path.read_text())
+        if phase.get("workload_clock") != "target_realtime":
+            continue
+        start = int(phase["workload_start_epoch_ns"]) / 1e9
+        end = int(phase["workload_end_epoch_ns"]) / 1e9
         con = duckdb.connect(str(db), read_only=True)
         tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
         if "system_pressure_samples" not in tables:
             con.close()
             continue
         rows = con.execute(
-            "SELECT value FROM system_pressure_samples WHERE metric='proc_stat' ORDER BY ts"
+            "SELECT value FROM system_pressure_samples "
+            "WHERE metric='proc_stat' AND epoch(ts)>=? AND epoch(ts)<? ORDER BY ts",
+            [start, end],
         ).fetchall()
         con.close()
+        samples: list[dict[int, tuple[int, int]]] = []
         for (text,) in rows:
             current = {}
             for line in str(text).splitlines():
@@ -73,22 +84,28 @@ def _node_pressure(experiment: Path, topology: dict[int, str]) -> dict[int, floa
                 current[cpu] = (total, idle)
             if current:
                 samples.append(current)
-    if len(samples) < 2:
-        return {}
-    first, last = samples[0], samples[-1]
-    pressure = {}
-    for node, cpulist in topology.items():
-        busy = total = 0
-        for cpu in _expand_cpu_list(cpulist):
-            if cpu not in first or cpu not in last:
-                continue
-            total_delta = last[cpu][0] - first[cpu][0]
-            idle_delta = last[cpu][1] - first[cpu][1]
-            total += max(total_delta, 0)
-            busy += max(total_delta - idle_delta, 0)
-        if total:
-            pressure[node] = busy / total
-    return pressure
+        if len(samples) < 2:
+            continue
+        first, last = samples[0], samples[-1]
+        pressure = {}
+        for node, cpulist in topology.items():
+            busy = total = 0
+            for cpu in _expand_cpu_list(cpulist):
+                if cpu not in first or cpu not in last:
+                    continue
+                total_delta = last[cpu][0] - first[cpu][0]
+                idle_delta = last[cpu][1] - first[cpu][1]
+                total += max(total_delta, 0)
+                busy += max(total_delta - idle_delta, 0)
+            if total:
+                pressure[node] = busy / total
+        if pressure:
+            per_run.append(pressure)
+    return {
+        node: statistics.mean(run[node] for run in per_run if node in run)
+        for node in topology
+        if any(node in run for run in per_run)
+    }
 
 
 class DisjointSet:

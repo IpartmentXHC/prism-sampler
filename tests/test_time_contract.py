@@ -4,10 +4,15 @@ import tempfile
 import unittest
 from datetime import timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from prism_sampler.artifacts import _duckdb_timestamp as artifact_timestamp
 from prism_sampler.collectors.session import measure_clock_offset
-from prism_sampler.orchestration.runner import _target_workload_bounds, _timeline
+from prism_sampler.orchestration.runner import (
+    _postprocess_experiment,
+    _target_workload_bounds,
+    _timeline,
+)
 from prism_sampler.remote import Host
 from prism_sampler.sidecars import _duckdb_timestamp as sidecar_timestamp
 
@@ -44,6 +49,18 @@ class TimeContractTest(unittest.TestCase):
         result = measure_clock_offset(Host("local"))
         self.assertEqual(result["target_clock_offset_ns"], 0)
         self.assertEqual(result["target_clock_uncertainty_ns"], 0)
+
+    def test_postprocess_skips_policy_when_no_relationship_exists(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch(
+                "prism_sampler.relations.analyze_experiment",
+                return_value={"runs": 2, "errors": 0, "candidates": 0},
+            ):
+                result = _postprocess_experiment(root, 2, yba_returncode=0)
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(result["policy"]["status"], "skipped")
+            self.assertTrue((root / "summary/postprocess.json").is_file())
 
 
 if __name__ == "__main__":

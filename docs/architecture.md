@@ -28,6 +28,8 @@ copy the analysis UI or modify upstream ownership boundaries.
 6. Stop in reverse order, copy raw files, and preserve raw DB3 unchanged.
 7. Build `telemetry.db3`, validate required tables, then analyze only the exact
    target-clock workload interval.
+8. Generate relationship features and a candidate-only policy automatically;
+   record an explicit skipped status when no eligible relationship exists.
 
 Hook and stop operations are idempotent. Required plugin failure prevents the
 workload; optional failure is recorded in capabilities and health artifacts.
