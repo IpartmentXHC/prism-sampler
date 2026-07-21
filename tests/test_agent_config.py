@@ -6,6 +6,7 @@ from pathlib import Path
 
 from prism_sampler.agent import snapshot
 from prism_sampler.config import load_config, validate_config
+from prism_sampler.hooks import _run_dir
 
 
 class AgentConfigTest(unittest.TestCase):
@@ -38,6 +39,8 @@ platform = "kunpeng-920"
             config = load_config(path)
             self.assertEqual(validate_config(config), [])
             self.assertEqual(config.values["platform"]["name"], "kunpeng-920")
+            run = _run_dir(config, {"system": "clickhouse"}, "run", "load", 1)
+            self.assertEqual(run, Path("/tmp/out/clickhouse/run/runs/load/r1"))
 
 
 if __name__ == "__main__":

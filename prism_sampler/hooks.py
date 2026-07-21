@@ -19,6 +19,14 @@ def _safe(value: object) -> str:
     return text or "unknown"
 
 
+def _system_name(config: SamplerConfig, context: dict[str, Any]) -> str:
+    return str(
+        context.get("system")
+        or config.section("experiment").get("system")
+        or "unknown"
+    )
+
+
 def _state_root(config: SamplerConfig) -> Path:
     root = Path(config.section("experiment").get("output_root", "/data/threadState/experiments"))
     path = root / ".prism-sampler-state"
@@ -35,7 +43,7 @@ def _discover_pids(config: SamplerConfig, context: dict[str, Any]) -> tuple[list
     pids = [int(row["pid"]) for row in rows if int(row.get("pid", 0)) > 0]
     starts = {int(row["pid"]): int(row["start_time"]) for row in rows if row.get("start_time")}
     if not pids:
-        system_name = str(config.section("experiment").get("system", ""))
+        system_name = _system_name(config, context)
         system_path = CONFIG_ROOT / "systems" / f"{system_name}.toml"
         if not system_path.is_file():
             raise RuntimeError("hook context has no target PID and experiment.system is not configured")
@@ -58,9 +66,15 @@ def _identity(context: dict[str, Any]) -> tuple[str, str, int]:
     return session, phase, round_number
 
 
-def _run_dir(config: SamplerConfig, session: str, phase: str, round_number: int) -> Path:
+def _run_dir(
+    config: SamplerConfig,
+    context: dict[str, Any],
+    session: str,
+    phase: str,
+    round_number: int,
+) -> Path:
     root = Path(config.section("experiment").get("output_root", "/data/threadState/experiments"))
-    system = _safe(config.section("experiment").get("system", "unknown"))
+    system = _safe(_system_name(config, context))
     return root / system / _safe(session) / "runs" / _safe(phase) / f"r{round_number}"
 
 
@@ -82,7 +96,7 @@ def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
     config = load_config(config_path)
     context = json.loads(context_path.read_text(encoding="utf-8"))
     session, phase, round_number = _identity(context)
-    run_dir = _run_dir(config, session, phase, round_number)
+    run_dir = _run_dir(config, context, session, phase, round_number)
     phase_path = run_dir / "meta" / "phase.json"
     phase_context = _append_event(phase_path, event, context)
     if event == "server_ready":

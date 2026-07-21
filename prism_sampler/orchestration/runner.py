@@ -84,6 +84,7 @@ def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
         "EXTERNAL_HOOK_REMOTE_COMMAND": remote_hook,
         "EXTERNAL_HOOK_REMOTE_CONFIG": remote_config,
         "EXTERNAL_HOOK_RUN_ID": run_id,
+        "EXTERNAL_HOOK_SYSTEM": system,
         "PRISM_SAMPLER_CONFIG": str(config.source),
         "TIMESTAMP": stamp,
         "EXPERIMENT_NAME": experiment_name,
