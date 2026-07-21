@@ -212,7 +212,10 @@ class CollectionSession:
         interval = float(self.config.sampling.get("interval_seconds", 10))
         output = shlex.quote(f"{self.remote_dir}/system-pressure.jsonl")
         self._start_process(
-            "snapshot", f"{shlex.quote(agent)} --output {output} {args} --interval {interval}"
+            "snapshot",
+            self._prefix(
+                f"{shlex.quote(agent)} --output {output} {args} --interval {interval}"
+            ),
         )
 
     def _start_perf_core(self) -> None:

@@ -31,6 +31,8 @@ copy the analysis UI or modify upstream ownership boundaries.
 
 Hook and stop operations are idempotent. Required plugin failure prevents the
 workload; optional failure is recorded in capabilities and health artifacts.
+The target-local snapshot agent runs through the configured privilege helper so
+processes that restrict `/proc/PID/numa_maps` still produce NUMA evidence.
 
 ## Sampling Profiles
 
