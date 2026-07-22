@@ -71,7 +71,8 @@ def _agent_snapshots(db_path: Path, snapshot_path: Path) -> dict[str, int]:
         ts = _duckdb_timestamp(float(sample["realtime_ns"]) / 1e9)
         mono = int(sample["monotonic_ns"])
         for metric in (
-            "loadavg", "proc_stat", "schedstat", "pressure_cpu", "pressure_memory", "pressure_io"
+            "loadavg", "proc_stat", "schedstat", "pressure_cpu", "pressure_memory", "pressure_io",
+            "cpu_frequency_khz",
         ):
             system_rows.append({
                 "ts": ts, "monotonic_ns": mono, "metric": metric,

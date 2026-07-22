@@ -67,9 +67,54 @@ class PolicyTest(unittest.TestCase):
             self.assertIsNone(selected["expected_gain"])
             self.assertLessEqual(selected["cpu_demand"], selected["capacity_limit"])
             self.assertEqual(selected["groups"], ["a", "b"])
+            self.assertEqual(selected["action_type"], "multi_group_colocation")
+            self.assertEqual(selected["relationship_evidence"]["self_score_sum"], 0)
             env = (experiment / "policy/yba-profile.env").read_text()
             self.assertIn("ENABLE_THREAD_CLUSTER=0", env)
             self.assertGreater(result["candidates"], 0)
+
+    def test_self_only_generates_capacity_checked_singleton(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            experiment = Path(temporary)
+            summary = experiment / "summary"
+            raw = experiment / "runs/load/r1/raw"
+            summary.mkdir(parents=True)
+            raw.mkdir(parents=True)
+            pd.DataFrame([{
+                "phase": "load", "group_name": "worker", "self_score_r": 75.0,
+                "thread_count": 8, "active_cpus": 2.0, "runqueue_cpus": 1.0,
+                "activity": 0.8, "synchronization": 0.7, "sharing": 0.4,
+                "stability": 0.9,
+            }]).to_csv(summary / "self-candidates.csv", index=False)
+            (raw / "capabilities.json").write_text(json.dumps({
+                "platform": {"numa_cpu_lists": {"0": "0-7", "1": "8-15"}}
+            }))
+            generate_policies(experiment)
+            selected = json.loads((experiment / "policy/selected-policy.json").read_text())
+            self.assertEqual(selected["action_type"], "singleton_colocation")
+            self.assertEqual(selected["groups"], ["worker"])
+            self.assertEqual(selected["relationship_evidence"]["pair_score_sum"], 0)
+            self.assertEqual(selected["relationship_evidence"]["self_score_sum"], 75.0)
+            self.assertFalse(selected["apply_allowed"])
+
+    def test_rejects_singleton_over_node_capacity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            experiment = Path(temporary)
+            summary = experiment / "summary"
+            raw = experiment / "runs/load/r1/raw"
+            summary.mkdir(parents=True)
+            raw.mkdir(parents=True)
+            pd.DataFrame([{
+                "phase": "load", "group_name": "worker", "self_score_r": 75.0,
+                "thread_count": 8, "active_cpus": 7.0, "runqueue_cpus": 1.0,
+                "activity": 0.8, "synchronization": 0.7, "sharing": 0.4,
+                "stability": 0.9,
+            }]).to_csv(summary / "self-candidates.csv", index=False)
+            (raw / "capabilities.json").write_text(json.dumps({
+                "platform": {"numa_cpu_lists": {"0": "0-7", "1": "8-15"}}
+            }))
+            with self.assertRaisesRegex(ValueError, "no relationship community"):
+                generate_policies(experiment)
 
 
 if __name__ == "__main__":

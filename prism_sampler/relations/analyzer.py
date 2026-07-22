@@ -12,7 +12,8 @@ from typing import Any
 import pandas as pd
 
 
-FORMULA_ID = "sync_share_benefit_v2"
+PAIR_FORMULA_ID = "sync_share_benefit_v2"
+SELF_FORMULA_ID = "sync_share_self_benefit_v1"
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,11 @@ def _extract_frames(
         "group_a", "group_b", "shared_resource_windows", "shared_resources",
         "active_windows", "selective_requests", "selective_seconds", "selective_bytes",
     ])
+    empty_self_vfs = pd.DataFrame(columns=[
+        "group_name", "shared_resource_windows", "shared_resources",
+        "active_windows", "selective_requests", "selective_seconds",
+        "selective_bytes",
+    ])
     relation_windows: set[tuple[int, str, str]] = set()
     unresolved = {"futex_wait": 0, "futex_wake": 0, "vfs": 0}
     futex = empty_futex
@@ -191,7 +197,8 @@ def _extract_frames(
                 w.wake_success
               FROM wakes w JOIN waits q USING(window_index,futex_key_addr,futex_key_word,futex_key_offset)
               JOIN totals t USING(window_index,futex_key_addr,futex_key_word,futex_key_offset)
-              WHERE w.waker_group IS NOT NULL AND q.waiter_group IS NOT NULL AND t.total_success>0
+              WHERE w.waker_group IS NOT NULL AND q.waiter_group IS NOT NULL
+                AND t.total_success>0 AND (w.pid<>q.pid OR w.tid<>q.tid)
             )
             SELECT waker_group,waiter_group,count(DISTINCT window_index) active_windows,
               count(DISTINCT futex_key_addr||'-'||futex_key_word||'-'||futex_key_offset) shared_keys,
@@ -237,12 +244,13 @@ def _extract_frames(
             LEFT JOIN tid_groups qa ON qa.pid=q.pid AND qa.tid=q.tid
             WHERE coalesce(wx.group_name,wa.group_name) IS NOT NULL
               AND coalesce(qx.group_name,qa.group_name) IS NOT NULL
-              AND coalesce(wx.group_name,wa.group_name)<>coalesce(qx.group_name,qa.group_name)
+              AND (w.pid<>q.pid OR w.tid<>q.tid)
             """,
             [selected_start, selected_end, selected_start, selected_end],
         ).fetchall()
         relation_windows.update((int(i), str(a), str(b)) for i, a, b in direction_rows)
     vfs = empty_vfs
+    self_vfs = empty_self_vfs
     if "vfs" in tables:
         vw = _window_expr("v.ts_s", selected_start, window_seconds)
         vfs = con.execute(
@@ -283,6 +291,42 @@ def _extract_frames(
             """,
             [selected_start, selected_end],
         ).fetchdf()
+        self_vfs = con.execute(
+            f"""
+            WITH access0 AS (
+              SELECT {vw} window_index,v.pid,v.tid,v.device_id,v.inode_id,
+                sum(v.total_requests) AS requests,sum(v.total_time)/1e9 AS time_seconds,
+                sum(v.total_bytes) AS bytes
+              FROM vfs v WHERE {_pid_clause(pids, 'v')} AND epoch(v.ts_s)>=? AND epoch(v.ts_s)<?
+              GROUP BY window_index,v.pid,v.tid,v.device_id,v.inode_id
+            ), access AS (
+              SELECT a.window_index,a.pid,a.tid,coalesce(x.group_name,t.group_name) group_name,
+                a.device_id,a.inode_id,a.requests,a.time_seconds,a.bytes
+              FROM access0 a LEFT JOIN tid_group_windows x USING(window_index,pid,tid)
+              LEFT JOIN tid_groups t USING(pid,tid)
+              WHERE coalesce(x.group_name,t.group_name) IS NOT NULL
+            ), degrees AS (
+              SELECT window_index,device_id,inode_id,count(*) thread_degree FROM access
+              GROUP BY window_index,device_id,inode_id
+            ), pairs AS (
+              SELECT a.window_index,a.group_name,a.device_id,a.inode_id,d.thread_degree,
+                least(a.requests,b.requests) overlap_requests,
+                least(a.time_seconds,b.time_seconds) overlap_seconds,
+                least(a.bytes,b.bytes) overlap_bytes
+              FROM access a JOIN access b USING(window_index,group_name,device_id,inode_id)
+              JOIN degrees d USING(window_index,device_id,inode_id)
+              WHERE a.pid<b.pid OR (a.pid=b.pid AND a.tid<b.tid)
+            )
+            SELECT group_name,count(*) shared_resource_windows,
+              count(DISTINCT device_id||'-'||inode_id) shared_resources,
+              count(DISTINCT window_index) active_windows,
+              sum(overlap_requests/greatest(thread_degree-1,1)) selective_requests,
+              sum(overlap_seconds/greatest(thread_degree-1,1)) selective_seconds,
+              sum(overlap_bytes/greatest(thread_degree-1,1)) selective_bytes
+            FROM pairs GROUP BY group_name ORDER BY selective_seconds DESC
+            """,
+            [selected_start, selected_end],
+        ).fetchdf()
         vfs_windows = con.execute(
             f"""
             WITH access AS (
@@ -298,6 +342,23 @@ def _extract_frames(
             [selected_start, selected_end],
         ).fetchall()
         relation_windows.update((int(i), str(a), str(b)) for i, a, b in vfs_windows)
+        self_vfs_windows = con.execute(
+            f"""
+            WITH access AS (
+              SELECT DISTINCT {vw} window_index,v.pid,v.tid,
+                coalesce(x.group_name,t.group_name) group_name,v.device_id,v.inode_id
+              FROM vfs v LEFT JOIN tid_group_windows x
+                ON x.window_index={vw} AND x.pid=v.pid AND x.tid=v.tid
+              LEFT JOIN tid_groups t ON t.pid=v.pid AND t.tid=v.tid
+              WHERE {_pid_clause(pids, 'v')} AND epoch(v.ts_s)>=? AND epoch(v.ts_s)<?
+                AND coalesce(x.group_name,t.group_name) IS NOT NULL
+            ) SELECT DISTINCT a.window_index,a.group_name FROM access a JOIN access b
+              USING(window_index,group_name,device_id,inode_id)
+              WHERE a.pid<b.pid OR (a.pid=b.pid AND a.tid<b.tid)
+            """,
+            [selected_start, selected_end],
+        ).fetchall()
+        relation_windows.update((int(i), str(group), str(group)) for i, group in self_vfs_windows)
     con.close()
     relation_frame = pd.DataFrame(
         sorted(relation_windows), columns=["window_index", "group_a", "group_b"]
@@ -307,6 +368,7 @@ def _extract_frames(
         "group_windows": group_windows,
         "futex_directional": futex,
         "vfs_pairs": vfs,
+        "self_vfs": self_vfs,
         "relation_windows": relation_frame,
     }
     context = {
@@ -383,6 +445,46 @@ def _pair_features(frames: dict[str, pd.DataFrame], context: dict[str, Any]) -> 
     return pd.DataFrame(rows)
 
 
+def _self_features(frames: dict[str, pd.DataFrame], context: dict[str, Any]) -> pd.DataFrame:
+    activity = frames["group_activity"].set_index("group_name")
+    futex = frames["futex_directional"]
+    vfs = frames["self_vfs"]
+    relation_windows = frames["relation_windows"]
+    duration = float(context["duration_seconds"])
+    rows = []
+    for group_name, values in activity.iterrows():
+        internal = futex[
+            futex["waker_group"].eq(group_name) & futex["waiter_group"].eq(group_name)
+        ]
+        sync_seconds = float(internal["attributed_wait_seconds"].sum())
+        vrow = vfs[vfs["group_name"].eq(group_name)]
+        selective_seconds = float(vrow["selective_seconds"].sum()) if not vrow.empty else 0.0
+        rw = relation_windows[
+            relation_windows["group_a"].eq(group_name)
+            & relation_windows["group_b"].eq(group_name)
+        ]
+        active_cpus = float(values["active_cpus"])
+        rows.append({
+            "group_name": str(group_name),
+            "thread_count": int(values["thread_count"]),
+            "active_cpus": active_cpus,
+            "runqueue_cpus": float(values["runqueue_cpus"]),
+            "activity_raw": active_cpus,
+            "intra_sync_wait_count": float(internal["attributed_wait_count"].sum()),
+            "intra_sync_wait_seconds": sync_seconds,
+            "intra_sync_wake_success": float(internal["paired_wake_success"].sum()),
+            "sync_raw": sync_seconds / duration,
+            "vfs_shared_resources": int(vrow["shared_resources"].sum()) if not vrow.empty else 0,
+            "vfs_selective_requests": float(vrow["selective_requests"].sum()) if not vrow.empty else 0.0,
+            "vfs_selective_seconds": selective_seconds,
+            "vfs_selective_bytes": float(vrow["selective_bytes"].sum()) if not vrow.empty else 0.0,
+            "sharing_raw": selective_seconds / duration,
+            "relation_active_windows": int(rw["window_index"].nunique()),
+            "window_coverage": int(rw["window_index"].nunique()) / int(context["window_count"]),
+        })
+    return pd.DataFrame(rows)
+
+
 def _scale(values: pd.Series) -> float:
     logs = values.fillna(0).clip(lower=0).map(math.log1p)
     return float(logs.quantile(0.95)) if len(logs) else 0.0
@@ -392,7 +494,7 @@ def _normalize(value: float, scale: float) -> float:
     return min(math.log1p(max(value, 0.0)) / scale, 1.0) if scale > 0 else 0.0
 
 
-def _score(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) -> pd.DataFrame:
+def _score_pairs(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) -> pd.DataFrame:
     if rows.empty:
         return rows.copy()
     output = []
@@ -401,9 +503,9 @@ def _score(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) -> pd
         if not isinstance(key, tuple):
             key = (key,)
         base = values.copy()
-        base["activity_norm"] = base["activity_raw"].map(lambda x: _normalize(float(x), scales["activity_log_p95"]))
-        base["sync_norm"] = base["sync_raw"].map(lambda x: _normalize(float(x), scales["sync_log_p95"]))
-        base["sharing_norm"] = base["sharing_raw"].map(lambda x: _normalize(float(x), scales["sharing_log_p95"]))
+        base["activity_norm"] = base["activity_raw"].map(lambda x: _normalize(float(x), scales["pair_activity_log_p95"]))
+        base["sync_norm"] = base["sync_raw"].map(lambda x: _normalize(float(x), scales["pair_sync_log_p95"]))
+        base["sharing_norm"] = base["sharing_raw"].map(lambda x: _normalize(float(x), scales["pair_sharing_log_p95"]))
         base["sharing_score"] = base["sharing_norm"] * base["active_overlap_ratio"]
         base["base_signal"] = base["activity_norm"] * (
             0.7 * base["sync_norm"] + 0.3 * base["sharing_score"]
@@ -420,7 +522,7 @@ def _score(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) -> pd
         waker, waiter = (group_a, group_b) if sync_ab >= sync_ba else (group_b, group_a)
         total = sync_ab + sync_ba
         row = {
-            "formula_id": FORMULA_ID,
+            "formula_id": PAIR_FORMULA_ID,
             **{name: value for name, value in zip(keys, key)},
             "runs": len(base),
             "active_cpus_a": float(base["active_cpus_a"].mean()),
@@ -449,6 +551,60 @@ def _score(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) -> pd
         if rank_group else result["relationship_score_r"].rank(method="min", ascending=False)
     )
     return result.sort_values((["phase"] if grouped else []) + ["rank", "group_a", "group_b"])
+
+
+def _score_self(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) -> pd.DataFrame:
+    if rows.empty:
+        return rows.copy()
+    output = []
+    keys = ["phase", "group_name"] if grouped else ["group_name"]
+    for key, values in rows.groupby(keys, dropna=False):
+        if not isinstance(key, tuple):
+            key = (key,)
+        base = values.copy()
+        base["activity_norm"] = base["activity_raw"].map(
+            lambda x: _normalize(float(x), scales["self_activity_log_p95"])
+        )
+        base["sync_norm"] = base["sync_raw"].map(
+            lambda x: _normalize(float(x), scales["self_sync_log_p95"])
+        )
+        base["sharing_norm"] = base["sharing_raw"].map(
+            lambda x: _normalize(float(x), scales["self_sharing_log_p95"])
+        )
+        base["base_signal"] = base["activity_norm"] * (
+            0.7 * base["sync_norm"] + 0.3 * base["sharing_norm"]
+        )
+        mean_signal = float(base["base_signal"].mean())
+        deviation = float(base["base_signal"].std(ddof=1)) if len(base) > 1 else 0.0
+        repeatability = 1.0 / (1.0 + deviation / mean_signal) if mean_signal > 0 else 0.0
+        coverage = float(base["window_coverage"].mean())
+        stability = coverage * repeatability
+        row = {
+            "formula_id": SELF_FORMULA_ID,
+            **{name: value for name, value in zip(keys, key)},
+            "runs": len(base),
+            "thread_count": int(base["thread_count"].max()),
+            "active_cpus": float(base["active_cpus"].mean()),
+            "runqueue_cpus": float(base["runqueue_cpus"].mean()),
+            "activity_raw": float(base["activity_raw"].mean()),
+            "activity": float(base["activity_norm"].mean()),
+            "sync_raw": float(base["sync_raw"].mean()),
+            "synchronization": float(base["sync_norm"].mean()),
+            "sharing_raw": float(base["sharing_raw"].mean()),
+            "sharing": float(base["sharing_norm"].mean()),
+            "window_coverage": coverage,
+            "repeatability": repeatability,
+            "stability": stability,
+            "self_score_r": 100.0 * mean_signal * stability,
+        }
+        output.append(row)
+    result = pd.DataFrame(output)
+    rank_group = ["phase"] if grouped else None
+    result["rank"] = (
+        result.groupby(rank_group)["self_score_r"].rank(method="min", ascending=False)
+        if rank_group else result["self_score_r"].rank(method="min", ascending=False)
+    )
+    return result.sort_values((["phase"] if grouped else []) + ["rank", "group_name"])
 
 
 def _write_frames(output: Path, frames: dict[str, pd.DataFrame]) -> None:
@@ -482,21 +638,39 @@ def analyze_db(
         start=start, end=end, window_seconds=window_seconds,
     )
     pairs = _pair_features(frames, context)
+    self_features = _self_features(frames, context)
     scales = {
-        "activity_log_p95": _scale(pairs["activity_raw"]) if not pairs.empty else 0.0,
-        "sync_log_p95": _scale(pairs["sync_raw"]) if not pairs.empty else 0.0,
-        "sharing_log_p95": _scale(pairs["sharing_raw"]) if not pairs.empty else 0.0,
+        "pair_activity_log_p95": _scale(pairs["activity_raw"]) if not pairs.empty else 0.0,
+        "pair_sync_log_p95": _scale(pairs["sync_raw"]) if not pairs.empty else 0.0,
+        "pair_sharing_log_p95": _scale(pairs["sharing_raw"]) if not pairs.empty else 0.0,
+        "self_activity_log_p95": _scale(self_features["activity_raw"]),
+        "self_sync_log_p95": _scale(self_features["sync_raw"]),
+        "self_sharing_log_p95": _scale(self_features["sharing_raw"]),
     }
-    candidates = _score(pairs, scales, grouped=False)
-    result_frames = {**frames, "pair_features": pairs, "relation_candidates": candidates}
+    candidates = _score_pairs(pairs, scales, grouped=False)
+    self_candidates = _score_self(self_features, scales, grouped=False)
+    result_frames = {
+        **frames,
+        "pair_features": pairs,
+        "self_features": self_features,
+        "relation_candidates": candidates,
+        "self_candidates": self_candidates,
+    }
     _write_frames(output, result_frames)
     (output / "relation-scales.json").write_text(json.dumps(scales, indent=2, sort_keys=True) + "\n")
     (output / "run-summary.json").write_text(json.dumps(context, indent=2, sort_keys=True) + "\n")
-    return {"context": context, "scales": scales, "candidates": len(candidates), "output": str(output)}
+    return {
+        "context": context,
+        "scales": scales,
+        "candidates": len(candidates),
+        "self_candidates": len(self_candidates),
+        "output": str(output),
+    }
 
 
 def analyze_experiment(experiment: Path, *, window_seconds: int = 10) -> dict[str, Any]:
-    runs: list[pd.DataFrame] = []
+    pair_runs: list[pd.DataFrame] = []
+    self_runs: list[pd.DataFrame] = []
     errors = []
     for db_path in sorted(experiment.glob("runs/**/dataset/telemetry.db3")):
         run_dir = db_path.parents[1]
@@ -517,12 +691,19 @@ def analyze_experiment(experiment: Path, *, window_seconds: int = 10) -> dict[st
                 window_seconds=window_seconds,
             )
             pairs = _pair_features(frames, context)
+            self_features = _self_features(frames, context)
             phase = str(context_meta.get("phase") or run_dir.parent.name)
             round_number = int(context_meta.get("round") or run_dir.name.removeprefix("r") or 1)
             pairs["phase"] = phase
             pairs["round"] = round_number
-            runs.append(pairs)
-            _write_frames(run_dir / "features", {**frames, "pair_features": pairs})
+            self_features["phase"] = phase
+            self_features["round"] = round_number
+            pair_runs.append(pairs)
+            self_runs.append(self_features)
+            _write_frames(
+                run_dir / "features",
+                {**frames, "pair_features": pairs, "self_features": self_features},
+            )
             run_summary = {
                 **context,
                 "phase": phase,
@@ -539,17 +720,34 @@ def analyze_experiment(experiment: Path, *, window_seconds: int = 10) -> dict[st
             )
         except Exception as exc:
             errors.append({"db": str(db_path), "error": f"{type(exc).__name__}: {exc}"})
-    all_pairs = pd.concat(runs, ignore_index=True) if runs else pd.DataFrame()
+    all_pairs = pd.concat(pair_runs, ignore_index=True) if pair_runs else pd.DataFrame()
+    all_self = pd.concat(self_runs, ignore_index=True) if self_runs else pd.DataFrame()
     scales = {
-        "activity_log_p95": _scale(all_pairs["activity_raw"]) if not all_pairs.empty else 0.0,
-        "sync_log_p95": _scale(all_pairs["sync_raw"]) if not all_pairs.empty else 0.0,
-        "sharing_log_p95": _scale(all_pairs["sharing_raw"]) if not all_pairs.empty else 0.0,
+        "pair_activity_log_p95": _scale(all_pairs["activity_raw"]) if not all_pairs.empty else 0.0,
+        "pair_sync_log_p95": _scale(all_pairs["sync_raw"]) if not all_pairs.empty else 0.0,
+        "pair_sharing_log_p95": _scale(all_pairs["sharing_raw"]) if not all_pairs.empty else 0.0,
+        "self_activity_log_p95": _scale(all_self["activity_raw"]) if not all_self.empty else 0.0,
+        "self_sync_log_p95": _scale(all_self["sync_raw"]) if not all_self.empty else 0.0,
+        "self_sharing_log_p95": _scale(all_self["sharing_raw"]) if not all_self.empty else 0.0,
     }
-    candidates = _score(all_pairs, scales, grouped=True) if not all_pairs.empty else pd.DataFrame()
+    candidates = (
+        _score_pairs(all_pairs, scales, grouped=True) if not all_pairs.empty else pd.DataFrame()
+    )
+    self_candidates = (
+        _score_self(all_self, scales, grouped=True) if not all_self.empty else pd.DataFrame()
+    )
     summary = experiment / "summary"
     summary.mkdir(parents=True, exist_ok=True)
     all_pairs.to_csv(summary / "pair-features.csv", index=False)
+    all_self.to_csv(summary / "self-features.csv", index=False)
     candidates.to_csv(summary / "relation-candidates.csv", index=False)
+    self_candidates.to_csv(summary / "self-candidates.csv", index=False)
     pd.DataFrame(errors, columns=["db", "error"]).to_csv(summary / "analysis-errors.csv", index=False)
     (summary / "relation-scales.json").write_text(json.dumps(scales, indent=2, sort_keys=True) + "\n")
-    return {"runs": len(runs), "errors": len(errors), "candidates": len(candidates), "summary": str(summary)}
+    return {
+        "runs": len(pair_runs),
+        "errors": len(errors),
+        "candidates": len(candidates),
+        "self_candidates": len(self_candidates),
+        "summary": str(summary),
+    }

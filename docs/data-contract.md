@@ -6,7 +6,7 @@ Each YBA phase produces an independent run:
 runs/<phase>/r<round>/
   raw/       collector.db3, perf CSV, pressure JSONL, logs
   dataset/   telemetry.db3
-  features/  activity, futex, VFS, pair features, R candidates
+  features/  activity, futex, VFS, pair/self features, R candidates
   meta/      phase context, capability and health records
 ```
 
@@ -31,7 +31,22 @@ with raw Unix timestamps regardless of the machine timezone. Raw DB3, perf CSV,
 and JSONL files are never rewritten when derived telemetry is rebuilt.
 
 Relationship analysis requires explicit target PIDs. It outputs every discovered
-thread group in `group-activity.csv`, while candidate pairs require both groups
-to be active and at least one futex or VFS relationship window. Experiment
+thread group in `group-activity.csv`. `relation-candidates.csv` contains
+`R_pair` edges between distinct groups. `self-candidates.csv` contains
+`R_self` node weights; intra-group VFS sharing requires at least two distinct
+TIDs in the same logical group to access the same resource. Experiment
 analysis is restricted to the exact YBA workload interval; collector attach and
 flush samples remain available in telemetry but do not contribute to R.
+
+The static scores are:
+
+```text
+R_pair(i,j) = 100 * Activity_pair * Stability_pair
+              * (0.7 * Sync_inter + 0.3 * Share_inter)
+R_self(i)   = 100 * Activity_i * Stability_i
+              * (0.7 * Sync_intra + 0.3 * Share_intra)
+```
+
+Synchronization contains attributed futex intensity, sharing contains selective
+VFS intensity, and relationship-window coverage appears only in stability.
+Pair and self features use separate experiment-wide P95 log scales.

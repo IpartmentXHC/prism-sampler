@@ -145,7 +145,7 @@ def derived_pmu_metrics(samples: Iterable[PerfSample], interval_seconds: float) 
                     return value
             return None
 
-        cycles = find("cycles")
+        cycles = find("cycles", "cpu_cycles")
         instructions = find("instructions")
         cache_refill = find("l2d_cache_refill", "cache_misses", "ll_cache_miss_rd")
         stalls = find("stall_backend", "stalled_cycles_backend")

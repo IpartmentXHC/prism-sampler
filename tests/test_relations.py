@@ -40,6 +40,7 @@ def sample_db(path: Path) -> None:
         ts = start + timedelta(seconds=index * 10)
         for tid, comm, run, rq in (
             (11, "pool-a-1", 0.5, 0.1),
+            (14, "pool-a-2", 0.3, 0.1),
             (12, "pool-b", 0.4, 0.2),
             (13, "pool-c", 0.2, 0.0),
         ):
@@ -56,8 +57,10 @@ def sample_db(path: Path) -> None:
         con.execute("INSERT INTO futex_wait VALUES (?,?,?,?,?,?,?,?)", [ts,10,12,1,2,3,10,10_000_000_000])
         con.execute("INSERT INTO futex_wake VALUES (?,?,?,?,?,?,?,?)", [ts,10,11,1,2,3,3,3])
         con.execute("INSERT INTO futex_wake VALUES (?,?,?,?,?,?,?,?)", [ts,10,13,1,2,3,1,1])
+        con.execute("INSERT INTO futex_wait VALUES (?,?,?,?,?,?,?,?)", [ts,10,14,4,5,6,4,4_000_000_000])
+        con.execute("INSERT INTO futex_wake VALUES (?,?,?,?,?,?,?,?)", [ts,10,11,4,5,6,4,4])
     ts = start + timedelta(seconds=15)
-    for tid, requests, nanos, size in ((11,10,1000,100),(12,6,800,80),(13,2,500,50)):
+    for tid, requests, nanos, size in ((11,10,1000,100),(14,8,900,90),(12,6,800,80),(13,2,500,50)):
         con.execute("INSERT INTO vfs VALUES (?,?,?,?,?,?,?,?)", [ts,10,tid,1,42,requests,nanos,size])
     con.close()
 
@@ -84,6 +87,14 @@ class RelationTest(unittest.TestCase):
             self.assertAlmostEqual(row.stability, row.window_coverage)
             self.assertGreater(row.synchronization, 0)
             self.assertGreater(row.relationship_score_r, 0)
+            self_candidates = pd.read_csv(root / "features/self-candidates.csv")
+            self_row = self_candidates[self_candidates.group_name == "pool-a"].iloc[0]
+            self.assertEqual(self_row.thread_count, 2)
+            self.assertGreater(self_row.synchronization, 0)
+            self.assertGreater(self_row.sharing, 0)
+            self.assertGreater(self_row.self_score_r, 0)
+            inactive = self_candidates[self_candidates.group_name == "pool-c"].iloc[0]
+            self.assertEqual(inactive.self_score_r, 0)
             self.assertEqual(result["context"]["pids"], [10])
 
     def test_requires_at_least_one_window_after_trimming(self):

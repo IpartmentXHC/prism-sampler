@@ -138,9 +138,30 @@ def _group_demand(rows: pd.DataFrame) -> dict[str, float]:
     return {group: max(samples) for group, samples in values.items()}
 
 
-def _communities(rows: pd.DataFrame, capacity: float, top_k: int) -> list[dict[str, Any]]:
+def _self_demand(rows: pd.DataFrame) -> dict[str, float]:
+    return {
+        str(row["group_name"]): float(row["active_cpus"]) + float(row["runqueue_cpus"])
+        for _, row in rows.iterrows()
+    }
+
+
+def _self_evidence(rows: pd.DataFrame, members: list[str]) -> list[dict[str, Any]]:
+    if rows.empty:
+        return []
+    selected = rows[rows["group_name"].astype(str).isin(members)]
+    columns = [
+        "group_name", "self_score_r", "activity", "synchronization", "sharing",
+        "stability", "active_cpus", "runqueue_cpus", "thread_count",
+    ]
+    return selected[[column for column in columns if column in selected.columns]].to_dict("records")
+
+
+def _communities(
+    rows: pd.DataFrame, self_rows: pd.DataFrame, capacity: float, top_k: int
+) -> list[dict[str, Any]]:
     groups = set(rows["group_a"].astype(str)) | set(rows["group_b"].astype(str))
     demand = _group_demand(rows)
+    demand.update(_self_demand(self_rows))
     dsu = DisjointSet(groups)
     candidates: list[dict[str, Any]] = []
     for _, edge in rows.sort_values("relationship_score_r", ascending=False).iterrows():
@@ -153,13 +174,22 @@ def _communities(rows: pd.DataFrame, capacity: float, top_k: int) -> list[dict[s
         internal = rows[
             rows["group_a"].isin(members) & rows["group_b"].isin(members)
         ]
+        self_scores = _self_evidence(self_rows, members)
+        self_score_sum = sum(float(row["self_score_r"]) for row in self_scores)
+        pair_score_sum = float(internal["relationship_score_r"].sum())
+        self_density = self_score_sum / max(len(members), 1)
+        pair_density = pair_score_sum / max(len(members) * (len(members) - 1) / 2, 1)
         candidates.append({
+            "action_type": "multi_group_colocation",
             "groups": members,
             "cpu_demand": cpu_demand,
-            "edge_score_sum": float(internal["relationship_score_r"].sum()),
-            "community_score": float(internal["relationship_score_r"].sum())
-            / max(len(members) * (len(members) - 1) / 2, 1),
+            "self_score_sum": self_score_sum,
+            "pair_score_sum": pair_score_sum,
+            "self_score_density": self_density,
+            "pair_score_density": pair_density,
+            "community_static_score": self_density + pair_density,
             "strongest_edge_r": float(internal["relationship_score_r"].max()),
+            "evidence_self": self_scores,
             "evidence_edges": internal[[
                 "group_a", "group_b", "relationship_score_r", "activity",
                 "synchronization", "sharing", "stability",
@@ -170,13 +200,40 @@ def _communities(rows: pd.DataFrame, capacity: float, top_k: int) -> list[dict[s
         key = tuple(candidate["groups"])
         unique[key] = candidate
     return sorted(
-        unique.values(), key=lambda row: (row["community_score"], row["strongest_edge_r"]),
+        unique.values(),
+        key=lambda row: (row["community_static_score"], row["strongest_edge_r"]),
         reverse=True,
     )[:top_k]
 
 
-def _robust(rows: pd.DataFrame) -> pd.DataFrame:
-    phases = max(int(rows["phase"].nunique()), 1)
+def _singletons(rows: pd.DataFrame, capacity: float, top_k: int) -> list[dict[str, Any]]:
+    if rows.empty:
+        return []
+    candidates = []
+    for _, row in rows.sort_values("self_score_r", ascending=False).iterrows():
+        score = float(row["self_score_r"])
+        demand = float(row["active_cpus"]) + float(row["runqueue_cpus"])
+        if score <= 0 or int(row.get("thread_count", 0)) < 2 or demand > capacity:
+            continue
+        evidence_self = _self_evidence(pd.DataFrame([row]), [str(row["group_name"])])
+        candidates.append({
+            "action_type": "singleton_colocation",
+            "groups": [str(row["group_name"])],
+            "cpu_demand": demand,
+            "self_score_sum": score,
+            "pair_score_sum": 0.0,
+            "self_score_density": score,
+            "pair_score_density": 0.0,
+            "community_static_score": score,
+            "strongest_edge_r": 0.0,
+            "evidence_self": evidence_self,
+            "evidence_edges": [],
+        })
+    return candidates[:top_k]
+
+
+def _robust(rows: pd.DataFrame, phases: int) -> pd.DataFrame:
+    phases = max(phases, 1)
     output = []
     for (group_a, group_b), values in rows.groupby(["group_a", "group_b"]):
         scores = [float(value) for value in values["relationship_score_r"]]
@@ -199,13 +256,38 @@ def _robust(rows: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(output)
 
 
+def _robust_self(rows: pd.DataFrame, phases: int) -> pd.DataFrame:
+    phases = max(phases, 1)
+    output = []
+    for group_name, values in rows.groupby("group_name"):
+        present = values[values["self_score_r"] > 0]
+        if present.empty:
+            continue
+        scores = [float(value) for value in present["self_score_r"]]
+        presence = int(present["phase"].nunique()) / phases
+        output.append({
+            "phase": "robust",
+            "group_name": group_name,
+            "self_score_r": statistics.median(scores) * presence,
+            "phase_presence_ratio": presence,
+            "thread_count": int(present["thread_count"].max()),
+            "active_cpus": float(present["active_cpus"].max()),
+            "runqueue_cpus": float(present["runqueue_cpus"].max()),
+            "activity": float(present["activity"].median()),
+            "synchronization": float(present["synchronization"].median()),
+            "sharing": float(present["sharing"].median()),
+            "stability": float(present["stability"].median()),
+        })
+    return pd.DataFrame(output)
+
+
 def _policy(
     scope: str,
     mode: str,
     community: dict[str, Any],
     topology: dict[int, str],
     target_node: int,
-    evidence: Path,
+    evidence: list[Path],
     selection_reason: str,
 ) -> dict[str, Any]:
     remaining = sorted(node for node in topology if node != target_node)
@@ -219,6 +301,7 @@ def _policy(
         "apply_allowed": False,
         "expected_gain": None,
         "expected_gain_model": "unavailable",
+        "action_type": community["action_type"],
         "scope": scope,
         "mode": mode,
         "target_nodes": [target_node],
@@ -230,24 +313,31 @@ def _policy(
         "cpu_demand": community["cpu_demand"],
         "capacity_limit": len(_expand_cpu_list(topology[target_node])) * 0.8,
         "relationship_evidence": {
-            "edge_score_sum": community["edge_score_sum"],
-            "community_score": community["community_score"],
+            "self_score_sum": community["self_score_sum"],
+            "pair_score_sum": community["pair_score_sum"],
+            "self_score_density": community["self_score_density"],
+            "pair_score_density": community["pair_score_density"],
+            "community_static_score": community["community_static_score"],
             "strongest_edge_r": community["strongest_edge_r"],
+            "self_scores": community["evidence_self"],
             "edges": community["evidence_edges"],
         },
         "fallback": {"name": "one_node", "memory_policy": "system-default"},
         "selection_reason": selection_reason,
-        "evidence": {"relation_candidates": str(evidence), "sha256": _sha256(evidence)},
+        "evidence": [
+            {"path": str(path), "sha256": _sha256(path)} for path in evidence
+        ],
     }
 
 
 def generate_policies(experiment: Path, *, top_k: int = 5) -> dict[str, Any]:
-    evidence = experiment / "summary" / "relation-candidates.csv"
-    if not evidence.is_file():
-        raise ValueError(f"relationship candidates do not exist: {evidence}")
-    rows = pd.read_csv(evidence)
-    if rows.empty:
-        raise ValueError("relationship candidate table is empty")
+    pair_evidence = experiment / "summary" / "relation-candidates.csv"
+    self_evidence = experiment / "summary" / "self-candidates.csv"
+    rows = pd.read_csv(pair_evidence) if pair_evidence.is_file() else pd.DataFrame()
+    self_rows = pd.read_csv(self_evidence) if self_evidence.is_file() else pd.DataFrame()
+    if rows.empty and self_rows.empty:
+        raise ValueError("pair and self relationship candidate tables are empty or missing")
+    evidence = [path for path in (pair_evidence, self_evidence) if path.is_file()]
     topology = _topology(experiment)
     pressures = _node_pressure(experiment, topology)
     target_node = min(pressures, key=lambda node: (pressures[node], node)) if pressures else min(topology)
@@ -256,13 +346,36 @@ def generate_policies(experiment: Path, *, top_k: int = 5) -> dict[str, Any]:
         if pressures else "lowest NUMA node ID; background-node pressure was unavailable"
     )
     capacity = len(_expand_cpu_list(topology[target_node])) * 0.8
-    scopes = [(str(phase), values.copy()) for phase, values in rows.groupby("phase")]
-    robust = _robust(rows)
-    if not robust.empty:
-        scopes.append(("robust", robust))
+    phase_names = sorted(
+        set(rows["phase"].astype(str) if not rows.empty else [])
+        | set(self_rows["phase"].astype(str) if not self_rows.empty else [])
+    )
+    scopes = [
+        (
+            phase,
+            rows[rows["phase"].astype(str).eq(phase)].copy() if not rows.empty else pd.DataFrame(),
+            self_rows[self_rows["phase"].astype(str).eq(phase)].copy()
+            if not self_rows.empty else pd.DataFrame(),
+        )
+        for phase in phase_names
+    ]
+    robust = _robust(rows, len(phase_names)) if not rows.empty else pd.DataFrame()
+    robust_self = (
+        _robust_self(self_rows, len(phase_names)) if not self_rows.empty else pd.DataFrame()
+    )
+    if not robust.empty or not robust_self.empty:
+        scopes.append(("robust", robust, robust_self))
     policies = []
-    for scope, values in scopes:
-        for community in _communities(values, capacity, top_k):
+    for scope, values, self_values in scopes:
+        communities = _singletons(self_values, capacity, top_k)
+        if not values.empty:
+            communities.extend(_communities(values, self_values, capacity, top_k))
+        communities = sorted(
+            communities,
+            key=lambda row: row["community_static_score"],
+            reverse=True,
+        )[:top_k]
+        for community in communities:
             for mode in ("limited", "unlimited"):
                 policies.append(_policy(
                     scope, mode, community, topology, target_node, evidence, selection_reason
@@ -272,7 +385,7 @@ def generate_policies(experiment: Path, *, top_k: int = 5) -> dict[str, Any]:
     policies.sort(
         key=lambda row: (
             row["scope"] == "robust",
-            row["relationship_evidence"]["community_score"],
+            row["relationship_evidence"]["community_static_score"],
             row["mode"] == "limited",
         ),
         reverse=True,
@@ -370,11 +483,13 @@ def _explanation(policy: dict[str, Any]) -> str:
         "# Prism Sampler Candidate Policy\n\n"
         f"- Scope: `{policy['scope']}`\n"
         f"- Mode: `{policy['mode']}`\n"
+        f"- Action: `{policy['action_type']}`\n"
         f"- Groups: {groups}\n"
         f"- Target NUMA node: `{policy['target_nodes'][0]}`\n"
         f"- CPU demand: `{policy['cpu_demand']:.4f}` / `{policy['capacity_limit']:.4f}`\n"
-        f"- Relationship edge score sum: `{evidence['edge_score_sum']:.4f}`\n\n"
-        f"- Community edge density: `{evidence['community_score']:.4f}`\n\n"
+        f"- Self score sum: `{evidence['self_score_sum']:.4f}`\n"
+        f"- Pair score sum: `{evidence['pair_score_sum']:.4f}`\n"
+        f"- Static candidate score: `{evidence['community_static_score']:.4f}`\n\n"
         "This output is candidate-only. G has not been calibrated, expected throughput gain is unknown, "
         "and the generated YBA profile remains disabled by default.\n"
     )

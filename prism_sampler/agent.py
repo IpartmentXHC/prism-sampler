@@ -50,6 +50,18 @@ def _cpu_nodes() -> dict[int, int]:
     return result
 
 
+def _cpu_frequency_khz() -> dict[int, int]:
+    frequencies = {}
+    for cpu_path in Path("/sys/devices/system/cpu").glob("cpu[0-9]*"):
+        try:
+            cpu = int(cpu_path.name.removeprefix("cpu"))
+            value = int((cpu_path / "cpufreq" / "scaling_cur_freq").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        frequencies[cpu] = value
+    return frequencies
+
+
 def _process(pid: int) -> dict[str, Any]:
     status = _read(f"/proc/{pid}/status")
     affinity = ""
@@ -81,6 +93,9 @@ def snapshot(pids: list[int]) -> dict[str, Any]:
         "pressure_memory": _read("/proc/pressure/memory"),
         "pressure_io": _read("/proc/pressure/io"),
         "cpu_nodes": {str(cpu): node for cpu, node in cpu_nodes.items()},
+        "cpu_frequency_khz": {
+            str(cpu): frequency for cpu, frequency in _cpu_frequency_khz().items()
+        },
         "processes": [_process(pid) for pid in pids if Path(f"/proc/{pid}").exists()],
     }
 
