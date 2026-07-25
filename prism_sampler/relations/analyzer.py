@@ -498,7 +498,8 @@ def _score_pairs(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool)
     if rows.empty:
         return rows.copy()
     output = []
-    keys = ["phase", "group_a", "group_b"] if grouped else ["group_a", "group_b"]
+    prefix = [name for name in ("profile", "phase") if name in rows.columns]
+    keys = prefix + ["group_a", "group_b"] if grouped else ["group_a", "group_b"]
     for key, values in rows.groupby(keys, dropna=False):
         if not isinstance(key, tuple):
             key = (key,)
@@ -545,19 +546,20 @@ def _score_pairs(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool)
         }
         output.append(row)
     result = pd.DataFrame(output)
-    rank_group = ["phase"] if grouped else None
+    rank_group = prefix if grouped else None
     result["rank"] = (
         result.groupby(rank_group)["relationship_score_r"].rank(method="min", ascending=False)
         if rank_group else result["relationship_score_r"].rank(method="min", ascending=False)
     )
-    return result.sort_values((["phase"] if grouped else []) + ["rank", "group_a", "group_b"])
+    return result.sort_values(prefix + ["rank", "group_a", "group_b"])
 
 
 def _score_self(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) -> pd.DataFrame:
     if rows.empty:
         return rows.copy()
     output = []
-    keys = ["phase", "group_name"] if grouped else ["group_name"]
+    prefix = [name for name in ("profile", "phase") if name in rows.columns]
+    keys = prefix + ["group_name"] if grouped else ["group_name"]
     for key, values in rows.groupby(keys, dropna=False):
         if not isinstance(key, tuple):
             key = (key,)
@@ -599,12 +601,12 @@ def _score_self(rows: pd.DataFrame, scales: dict[str, float], *, grouped: bool) 
         }
         output.append(row)
     result = pd.DataFrame(output)
-    rank_group = ["phase"] if grouped else None
+    rank_group = prefix if grouped else None
     result["rank"] = (
         result.groupby(rank_group)["self_score_r"].rank(method="min", ascending=False)
         if rank_group else result["self_score_r"].rank(method="min", ascending=False)
     )
-    return result.sort_values((["phase"] if grouped else []) + ["rank", "group_name"])
+    return result.sort_values(prefix + ["rank", "group_name"])
 
 
 def _write_frames(output: Path, frames: dict[str, pd.DataFrame]) -> None:
@@ -693,7 +695,11 @@ def analyze_experiment(experiment: Path, *, window_seconds: int = 10) -> dict[st
             pairs = _pair_features(frames, context)
             self_features = _self_features(frames, context)
             phase = str(context_meta.get("phase") or run_dir.parent.name)
+            profile = str(context_meta.get("profile") or "")
             round_number = int(context_meta.get("round") or run_dir.name.removeprefix("r") or 1)
+            if profile:
+                pairs["profile"] = profile
+                self_features["profile"] = profile
             pairs["phase"] = phase
             pairs["round"] = round_number
             self_features["phase"] = phase

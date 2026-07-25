@@ -1,4 +1,3 @@
 name = "clickhouse"
 primary_pid_command = "pgrep -f 'clickhouse.*server.*--config-file' | head -1"
-all_pid_command = "pgrep -f 'clickhouse.*server.*--config-file'"
-
+all_pid_command = "pgrep -f '[c]lickhouse.*[s]erver.*--config-file'"

@@ -7,10 +7,11 @@ from pathlib import Path
 
 from .collectors import CollectionSession, SessionContext
 from .artifacts import finalize_run
+from .calibration import calibrate_experiment
 from .config import load_config, read_toml
 from .deploy import build_bundle, install_bundle, install_client, smoke_bundle
 from .hooks import handle
-from .orchestration import preflight, run_yba
+from .orchestration import preflight, run_yba, run_yba_suite
 from .platform import probe, write_report
 from .policies import generate_policies, render_yba, validate_policy
 from .relations import analyze_db, analyze_experiment
@@ -42,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--config", required=True, type=Path)
     run.add_argument("--yba-config", required=True, type=Path)
     run.add_argument("--scenario", required=True, type=Path)
+    run_suite = commands.add_parser("run-suite")
+    run_suite.add_argument("--config", required=True, type=Path)
+    run_suite.add_argument("--yba-config", required=True, type=Path)
+    run_suite.add_argument("--suite", required=True, type=Path)
+    run_suite.add_argument("--experiment-root", type=Path)
+    run_suite.add_argument("--resume", action="store_true")
 
     collect = commands.add_parser("collect")
     collect_sub = collect.add_subparsers(dest="collect_command", required=True)
@@ -66,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     aexp = analyze_sub.add_parser("experiment")
     aexp.add_argument("experiment", type=Path)
     aexp.add_argument("--window", type=int, default=10)
+
+    calibrate = commands.add_parser("calibrate")
+    calibrate_sub = calibrate.add_subparsers(dest="calibrate_command", required=True)
+    cexp = calibrate_sub.add_parser("experiment")
+    cexp.add_argument("experiment", type=Path)
+    cexp.add_argument("--baseline", default="one_node")
 
     policy = commands.add_parser("policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
@@ -115,6 +128,11 @@ def main() -> None:
         print(json.dumps(preflight(load_config(args.config)), indent=2, sort_keys=True))
     elif args.command == "run":
         raise SystemExit(run_yba(load_config(args.config), args.yba_config, args.scenario))
+    elif args.command == "run-suite":
+        raise SystemExit(run_yba_suite(
+            load_config(args.config), args.yba_config, args.suite,
+            experiment_root=args.experiment_root, resume=args.resume,
+        ))
     elif args.command == "collect":
         config = load_config(args.config)
         host = Host(config.target["host"])
@@ -157,6 +175,10 @@ def main() -> None:
         ), indent=2, sort_keys=True))
     elif args.command == "analyze":
         print(json.dumps(analyze_experiment(args.experiment, window_seconds=args.window), indent=2, sort_keys=True))
+    elif args.command == "calibrate":
+        print(json.dumps(calibrate_experiment(
+            args.experiment, baseline=args.baseline
+        ), indent=2, sort_keys=True))
     elif args.command == "policy" and args.policy_command == "generate":
         print(json.dumps(generate_policies(args.experiment, top_k=args.top_k), indent=2, sort_keys=True))
     elif args.command == "policy" and args.policy_command == "validate":

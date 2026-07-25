@@ -69,6 +69,17 @@ def _process(pid: int) -> dict[str, Any]:
         if line.startswith("Cpus_allowed_list:"):
             affinity = line.split(":", 1)[1].strip()
             break
+    threads = _command(["ps", "-L", "-p", str(pid), "-o", "pid=,lwp=,psr=,comm="])
+    thread_affinities = {}
+    for line in threads.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) < 2 or not fields[1].isdigit():
+            continue
+        tid = fields[1]
+        for status_line in _read(f"/proc/{pid}/task/{tid}/status").splitlines():
+            if status_line.startswith("Cpus_allowed_list:"):
+                thread_affinities[tid] = status_line.split(":", 1)[1].strip()
+                break
     return {
         "pid": pid,
         "stat": _read(f"/proc/{pid}/stat"),
@@ -76,7 +87,8 @@ def _process(pid: int) -> dict[str, Any]:
         "numa_maps": _read(f"/proc/{pid}/numa_maps"),
         "numastat": _command(["numastat", "-p", str(pid)]),
         "affinity": affinity,
-        "threads": _command(["ps", "-L", "-p", str(pid), "-o", "pid=,lwp=,psr=,comm="]),
+        "threads": threads,
+        "thread_affinities": thread_affinities,
     }
 
 

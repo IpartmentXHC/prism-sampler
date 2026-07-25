@@ -132,6 +132,30 @@ class RelationTest(unittest.TestCase):
             self.assertEqual(summary["duration_seconds"], 30)
             self.assertEqual(summary["workload_clock"], "target_realtime")
 
+    def test_experiment_keeps_profiles_separate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+            for profile in ("compact", "spread"):
+                run = root / "runs" / profile / "load" / "r1"
+                db = run / "dataset" / "telemetry.db3"
+                db.parent.mkdir(parents=True)
+                (run / "meta").mkdir()
+                sample_db(db)
+                (run / "meta" / "phase.json").write_text(json.dumps({
+                    "profile": profile,
+                    "phase": "load",
+                    "round": 1,
+                    "target_processes": [{"pid": 10, "start_time": 1}],
+                    "workload_clock": "target_realtime",
+                    "workload_start_epoch_ns": int((start + 10) * 1e9),
+                    "workload_end_epoch_ns": int((start + 40) * 1e9),
+                }))
+            result = analyze_experiment(root, window_seconds=10)
+            self.assertEqual(result["runs"], 2)
+            candidates = pd.read_csv(root / "summary" / "relation-candidates.csv")
+            self.assertEqual(set(candidates["profile"]), {"compact", "spread"})
+
 
 if __name__ == "__main__":
     unittest.main()

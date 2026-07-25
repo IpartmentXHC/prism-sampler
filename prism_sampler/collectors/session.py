@@ -177,6 +177,38 @@ class CollectionSession:
             if status.required:
                 raise
 
+    def _assert_process_alive(self, plugin: str) -> None:
+        pidfile = shlex.quote(self._pidfile(plugin))
+        alive = self.host.run(
+            f"pid=$(cat {pidfile} 2>/dev/null); test -n \"$pid\" && kill -0 \"$pid\"",
+            check=False,
+        ).returncode == 0
+        if alive:
+            return
+        detail = self.host.run(
+            f"tail -80 {shlex.quote(self._log(plugin))}", check=False
+        ).stdout.strip()
+        raise RuntimeError(detail or f"{plugin} exited during startup")
+
+    def _prepare_prism_retry(self, attempt: int) -> None:
+        self.host.stop(
+            self._pidfile("prism"),
+            signal="TERM",
+            timeout_seconds=5,
+            command_prefix=self.sudo,
+        )
+        log = shlex.quote(self._log("prism"))
+        attempt_log = shlex.quote(
+            f"{self.remote_dir}/prism-startup-attempt-{attempt}.log"
+        )
+        db = shlex.quote(f"{self.remote_dir}/collector.db3")
+        wal = shlex.quote(f"{self.remote_dir}/collector.db3.wal")
+        pidfile = shlex.quote(self._pidfile("prism"))
+        cleanup = f"test ! -e {log} || mv -f {log} {attempt_log}; rm -f {db} {wal} {pidfile}"
+        self.host.run(
+            self._prefix(f"sh -c {shlex.quote(cleanup)}"), check=False
+        )
+
     def _start_prism(self) -> None:
         collector = self.config.collector
         binary = shlex.quote(str(collector["binary"]))
@@ -202,9 +234,26 @@ class CollectionSession:
                 args += " --best-effort"
         else:
             self.collector_cli_mode = "legacy"
-        self._start_process("prism", self._prefix(f"env {env}{binary} {args}"))
-        time.sleep(float(self.config.collector.get("attach_wait_seconds", 12)))
-        self._validate_pids()
+        command = self._prefix(f"env {env}{binary} {args}")
+        attempts = max(1, int(self.config.collector.get("startup_attempts", 3)))
+        attach_wait = float(self.config.collector.get("attach_wait_seconds", 12))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            status = self.status["prism"]
+            status.started = status.healthy = False
+            status.error = ""
+            try:
+                self._start_process("prism", command)
+                time.sleep(attach_wait)
+                self._assert_process_alive("prism")
+                self._validate_pids()
+                return
+            except Exception as exc:
+                last_error = exc
+                status.started = status.healthy = False
+                status.error = f"startup attempt {attempt}/{attempts}: {exc}"
+                self._prepare_prism_retry(attempt)
+        raise RuntimeError(f"prism failed after {attempts} startup attempts: {last_error}")
 
     def _start_snapshot(self) -> None:
         agent = str(self.config.target.get("agent_command", "prism-sampler-agent"))
@@ -265,8 +314,21 @@ class CollectionSession:
             "arm-spe", self._prefix(f"perf record -e arm_spe_0// -p {pids} -o {output} -- sleep 86400")
         )
 
+    def _start_sched_trace(self) -> None:
+        duration = int(self.config.sampling.get("sched_trace_seconds", 60))
+        output = shlex.quote(f"{self.remote_dir}/sched-events.data")
+        clock = shlex.quote(f"{self.remote_dir}/sched-events.clock")
+        self.host.run(
+            f"printf '%s %s\\n' \"$(date +%s.%N)\" \"$(cut -d' ' -f1 /proc/uptime)\" > {clock}"
+        )
+        command = self._prefix(
+            "perf record -a -e sched:sched_process_fork -e sched:sched_waking "
+            f"-o {output} -- sleep {duration}"
+        )
+        self._start_process("sched-trace", command)
+
     def start(self) -> dict[str, Any]:
-        self.host.run(f"mkdir -p {shlex.quote(self.remote_dir)}")
+        self._reset_remote_dir()
         self._validate_pids()
         self.report = probe(self.host)
         starters = {
@@ -275,6 +337,7 @@ class CollectionSession:
             "perf-core": self._start_perf_core,
             "perf-uncore": self._start_perf_uncore,
             "arm-spe": self._start_spe,
+            "sched-trace": self._start_sched_trace,
         }
         try:
             for name in self.requested:
@@ -304,6 +367,11 @@ class CollectionSession:
         self.host.run(
             f"{command} {shlex.quote(self.remote_dir + '/' + name)} {shlex.quote(payload)}"
         )
+
+    def _reset_remote_dir(self) -> None:
+        remote_dir = shlex.quote(self.remote_dir)
+        self.host.run(self._prefix(f"rm -rf {remote_dir}"))
+        self.host.run(f"mkdir -p {remote_dir}")
 
     def health(self, state: str) -> dict[str, Any]:
         health = {
@@ -336,12 +404,26 @@ class CollectionSession:
                 timeout_seconds=int(self.config.collector.get("stop_timeout_seconds", 30)),
                 command_prefix=self.sudo,
             )
+        trace_status = self.status.get("sched-trace")
+        if trace_status and trace_status.started:
+            data = shlex.quote(f"{self.remote_dir}/sched-events.data")
+            text = shlex.quote(f"{self.remote_dir}/sched-events.txt")
+            result = self.host.run(
+                self._prefix(
+                    f"perf script -i {data} -F comm,pid,tid,time,event,trace"
+                ) + f" > {text}",
+                check=False,
+            )
+            if result.returncode:
+                trace_status.healthy = False
+                trace_status.error = "perf script failed: " + result.stderr.strip()
         expected = {
             "prism": "collector.db3",
             "snapshot": "system-pressure.jsonl",
             "perf-core": "perf-core.csv",
             "perf-uncore": "perf-uncore.csv",
             "arm-spe": "arm-spe.data",
+            "sched-trace": "sched-events.txt",
         }
         for name, filename in expected.items():
             status = self.status.get(name)
@@ -360,6 +442,8 @@ class CollectionSession:
             pass
         if copy:
             raw = self.context.local_run_dir / "raw"
+            if raw.exists():
+                shutil.rmtree(raw)
             raw.mkdir(parents=True, exist_ok=True)
             self.host.copy_from(self.remote_dir, raw, recursive=True)
             nested = raw / Path(self.remote_dir).name

@@ -14,3 +14,6 @@ optional = ["perf-core", "perf-uncore", "phase-marker"]
 required = ["prism", "snapshot"]
 optional = ["perf-core", "perf-uncore", "arm-spe", "phase-marker"]
 
+[profiles.sched-diagnostic]
+required = ["prism", "snapshot", "sched-trace"]
+optional = ["perf-core", "perf-uncore", "phase-marker"]

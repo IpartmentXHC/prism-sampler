@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -124,6 +125,155 @@ def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
     if finalized_runs:
         _postprocess_experiment(experiment_root, finalized_runs, yba_returncode=returncode)
     return returncode
+
+
+def run_yba_suite(
+    config: SamplerConfig,
+    yba_config: Path,
+    suite_config: Path,
+    *,
+    experiment_root: Path | None = None,
+    resume: bool = False,
+) -> int:
+    check = preflight(config)
+    yba_root = Path(config.section("yba")["root"])
+    runner = yba_root / "tools" / "run-suite.sh"
+    if not runner.is_file():
+        raise ValueError(f"YBA suite runner does not exist: {runner}")
+    output_root = Path(config.section("experiment").get("output_root", "/data/threadState/experiments"))
+    system = str(config.section("experiment").get("system", "unknown"))
+    if experiment_root is None:
+        if resume:
+            raise ValueError("--resume requires --experiment-root")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        experiment_root = output_root / system / f"{stamp}-{suite_config.stem}"
+    experiment_root = experiment_root.resolve()
+    experiment_root.mkdir(parents=True, exist_ok=True)
+    (experiment_root / "preflight.json").write_text(
+        json.dumps(check, indent=2, sort_keys=True) + "\n"
+    )
+    suite_dir = experiment_root / "yba-suite"
+    env = os.environ.copy()
+    local_hook = (
+        f"{shlex.quote(sys.executable)} -m prism_sampler.hooks "
+        f"--config {shlex.quote(str(config.source))}"
+    )
+    client = config.section("client")
+    env.update({
+        "ENABLE_METRICS": "0",
+        "ENABLE_EXTERNAL_HOOK": "1",
+        "EXTERNAL_HOOK_COMMAND": local_hook,
+        "EXTERNAL_HOOK_REMOTE_COMMAND": str(client.get("hook_command", "prism-sampler-hook")),
+        "EXTERNAL_HOOK_REMOTE_CONFIG": str(client.get("sampler_config", "")),
+        "EXTERNAL_HOOK_RUN_ID": experiment_root.name,
+        "EXTERNAL_HOOK_SYSTEM": system,
+        "PRISM_SAMPLER_CONFIG": str(config.source),
+        "SUITE_DIR": str(suite_dir),
+    })
+    command = [str(runner), "--config", str(yba_config), "--suite", str(suite_config)]
+    if resume:
+        command.append("--resume")
+    returncode = subprocess.run(command, cwd=yba_root, env=env, check=False).returncode
+    finalized = _collect_suite_runs(config, experiment_root, suite_dir)
+    if finalized:
+        from ..relations import analyze_experiment
+
+        analysis = analyze_experiment(experiment_root)
+        status = {
+            "schema": "prism-sampler.suite-postprocess.v1",
+            "yba_returncode": returncode,
+            "finalized_runs": finalized,
+            "analysis": analysis,
+            "status": "complete" if not analysis["errors"] else "failed",
+        }
+        summary = experiment_root / "summary"
+        summary.mkdir(parents=True, exist_ok=True)
+        (summary / "postprocess.json").write_text(
+            json.dumps(status, indent=2, sort_keys=True) + "\n"
+        )
+        if analysis["errors"] and returncode == 0:
+            raise RuntimeError(f"relationship analysis failed for {analysis['errors']} run(s)")
+    return returncode
+
+
+def _read_shell_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        key, raw = line.split("=", 1)
+        parsed = shlex.split(raw)
+        values[key] = parsed[0] if parsed else ""
+    return values
+
+
+def _collect_suite_runs(config: SamplerConfig, experiment: Path, suite_dir: Path) -> int:
+    client = config.section("client")
+    client_host = Host(str(client.get("host", "")))
+    client_output = str(client.get("output_root", "")).rstrip("/")
+    system = str(config.section("experiment").get("system", "unknown"))
+    if not client_output:
+        raise ValueError("client.output_root is required for Suite artifact collection")
+    incoming = experiment / ".incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    finalized = 0
+    for yba_cell in sorted((suite_dir / "runs").glob("*")):
+        marker = yba_cell / ".complete"
+        cell_meta = yba_cell / "meta" / "suite-run.env"
+        if not marker.is_file() or not cell_meta.is_file():
+            continue
+        values = _read_shell_env(cell_meta)
+        profile = values["profile"]
+        label = values.get("load") or values.get("scenario")
+        round_number = int(values["round"])
+        destination = experiment / "runs" / profile / label / f"r{round_number}"
+        if (destination / "dataset" / "telemetry.db3").is_file():
+            continue
+        hook_id = f"{experiment.name}-{yba_cell.name}"
+        remote = f"{client_output}/{system}/{hook_id}"
+        local_cell = incoming / hook_id
+        if not local_cell.exists():
+            exists = client_host.run(f"test -d {shlex.quote(remote)}", check=False)
+            if exists.returncode:
+                raise RuntimeError(f"Prism Suite cell output is missing: {remote}")
+            client_host.copy_from(remote, local_cell, recursive=True)
+        prism_runs = sorted(local_cell.glob("runs/*/r*"))
+        if len(prism_runs) != 1:
+            raise RuntimeError(f"expected one Prism phase in Suite cell: {local_cell}")
+        source_run = prism_runs[0]
+        phase_path = source_run / "meta" / "phase.json"
+        phase = json.loads(phase_path.read_text())
+        source_phase = str(phase.get("phase", ""))
+        if not source_phase:
+            raise RuntimeError(f"collected Prism phase has no phase label: {phase_path}")
+        phase["profile"] = profile
+        phase["phase"] = label
+        phase["source_phase"] = source_phase
+        phase["round"] = round_number
+        timeline = _timeline(yba_cell / "scenario-timeline.csv")
+        bounds = timeline.get(source_phase)
+        if not bounds:
+            raise RuntimeError(
+                f"Suite calibration requires timeline phase {source_phase}: {yba_cell}"
+            )
+        phase.update(_target_workload_bounds(bounds, phase))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_run, destination, dirs_exist_ok=True)
+        destination_phase = destination / "meta" / "phase.json"
+        destination_phase.write_text(json.dumps(phase, indent=2, sort_keys=True) + "\n")
+        finalize_run(destination, phase)
+        phase_dirs = sorted(yba_cell.glob(f"phases/*-{source_phase}"))
+        if len(phase_dirs) != 1:
+            raise RuntimeError(
+                f"expected one YBA phase directory for {source_phase}: {yba_cell}"
+            )
+        import_yba_kpi(destination, phase_dirs[0])
+        finalized += 1
+        client_host.run(f"rm -rf {shlex.quote(remote)}", check=False)
+        shutil.rmtree(local_cell, ignore_errors=True)
+    if incoming.exists() and not any(incoming.iterdir()):
+        incoming.rmdir()
+    return finalized
 
 
 def _timeline(path: Path) -> dict[str, dict[str, int]]:

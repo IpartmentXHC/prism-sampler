@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,12 @@ class AgentConfigTest(unittest.TestCase):
         self.assertGreater(value["monotonic_ns"], 0)
         self.assertIn("pressure_cpu", value)
         self.assertIn("cpu_frequency_khz", value)
+
+    def test_snapshot_records_per_thread_affinity(self):
+        value = snapshot([os.getpid()])
+        process = value["processes"][0]
+        self.assertIn(str(os.getpid()), process["thread_affinities"])
+        self.assertTrue(process["thread_affinities"][str(os.getpid())])
 
     def test_loads_layered_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:

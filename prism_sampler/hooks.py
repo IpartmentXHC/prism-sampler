@@ -66,6 +66,11 @@ def _identity(context: dict[str, Any]) -> tuple[str, str, int]:
     return session, phase, round_number
 
 
+def _collect_phase(config: SamplerConfig, phase: str) -> bool:
+    patterns = config.sampling.get("collect_phase_patterns", [])
+    return not patterns or any(re.search(str(pattern), phase) for pattern in patterns)
+
+
 def _run_dir(
     config: SamplerConfig,
     context: dict[str, Any],
@@ -96,6 +101,8 @@ def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
     config = load_config(config_path)
     context = json.loads(context_path.read_text(encoding="utf-8"))
     session, phase, round_number = _identity(context)
+    if event in {"phase_before", "phase_after"} and not _collect_phase(config, phase):
+        return {"event": event, "status": "skipped", "phase": phase}
     run_dir = _run_dir(config, context, session, phase, round_number)
     phase_path = run_dir / "meta" / "phase.json"
     phase_context = _append_event(phase_path, event, context)
