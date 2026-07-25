@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from prism_sampler.calibration import calibrate_experiment
+from prism_sampler.calibration import _suite_kpi, calibrate_experiment
 
 
 def test_calibration_is_read_only_proposal() -> None:
@@ -55,3 +55,30 @@ def test_calibration_is_read_only_proposal() -> None:
         assert effects[effects.label_type == "g"].effect_percent.tolist() == pytest.approx(
             [10.0] * 5
         )
+
+
+def test_suite_kpi_prefers_measurement_db() -> None:
+    import duckdb
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        suite = root / "yba-suite"
+        suite.mkdir()
+        pd.DataFrame([{
+            "profile": "one_node", "load": "c2t2", "round": 1,
+            "status": "ok", "throughput": 50, "p99_latency": 20,
+        }]).to_csv(suite / "suite-summary.csv", index=False)
+        dataset = root / "runs/one_node/c2t2/r1/dataset"
+        dataset.mkdir(parents=True)
+        con = duckdb.connect(str(dataset / "telemetry.db3"))
+        con.execute(
+            "create table yba_phase_kpi(phase varchar, throughput_ops_s double, "
+            "p99_latency_us double, error_count double, timeout_count double)"
+        )
+        con.execute("insert into yba_phase_kpi values ('measure_c2t2',100,10,0,0)")
+        con.close()
+
+        result = _suite_kpi(root)
+
+        assert result.iloc[0].throughput == 100
+        assert result.iloc[0].p99_latency == 10

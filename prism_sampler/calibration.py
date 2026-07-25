@@ -93,6 +93,34 @@ def _gate_a(scores: pd.DataFrame, baseline: str) -> dict[str, Any]:
 
 
 def _suite_kpi(experiment: Path) -> pd.DataFrame:
+    measurement_rows = []
+    for db in sorted(experiment.glob("runs/*/*/r*/dataset/telemetry.db3")):
+        import duckdb
+
+        run = db.parents[1]
+        profile, load, round_name = run.parts[-3:]
+        con = duckdb.connect(str(db), read_only=True)
+        tables = {row[0] for row in con.execute("show tables").fetchall()}
+        if "yba_phase_kpi" in tables:
+            row = con.execute(
+                "select throughput_ops_s,p99_latency_us,error_count,timeout_count "
+                "from yba_phase_kpi order by case when phase like 'measure_%' "
+                "then 0 else 1 end limit 1"
+            ).fetchone()
+            if row:
+                measurement_rows.append({
+                    "profile": profile,
+                    "load": load,
+                    "round": int(round_name.removeprefix("r")),
+                    "status": "ok",
+                    "throughput": row[0],
+                    "p99_latency": row[1],
+                    "error_count": row[2],
+                    "timeout_count": row[3],
+                })
+        con.close()
+    if measurement_rows:
+        return pd.DataFrame(measurement_rows)
     path = experiment / "yba-suite" / "suite-summary.csv"
     if not path.exists():
         return pd.DataFrame()
@@ -224,7 +252,10 @@ def calibrate_experiment(experiment: Path, *, baseline: str = "one_node") -> dic
               (row["top3_mean_jaccard"] or 0) < 0.5 or
               (row["top3_max_score_cv"] is not None and row["top3_max_score_cv"] > 0.5)]
     failed_text = ", ".join(
-        f"{row['candidate_type']}/{row['load']} (CV={row['top3_max_score_cv']:.3f})"
+        f"{row['candidate_type']}/{row['load']} (CV="
+        f"{row['top3_max_score_cv']:.3f})"
+        if row["top3_max_score_cv"] is not None else
+        f"{row['candidate_type']}/{row['load']} (CV=n/a)"
         for row in failed
     ) or "none"
     (summary / "formula-review.md").write_text(
