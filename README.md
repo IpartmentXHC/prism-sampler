@@ -3,7 +3,9 @@
 Prism Sampler is a Kunpeng-first collection and offline NUMA policy toolkit.
 YBA owns database lifecycle, workload execution, throughput, and latency. This
 repository owns eBPF/PMU/NUMA telemetry, relationship analysis, and guarded
-candidate policy generation. It does not implement an online scheduler.
+candidate policy generation. The `pressure-aware-numa-scaling` branch also
+contains an experimental ClickHouse node-level pressure controller; it remains
+disabled unless `--controller-mode shadow|active` is selected explicitly.
 
 ## Quick Start
 
@@ -34,9 +36,23 @@ prism-sampler analyze experiment /data/threadState/experiments/doris/run-id
 prism-sampler policy generate /data/threadState/experiments/doris/run-id
 ```
 
+Validate and run the pressure-aware NUMA prototype:
+
+```bash
+prism-sampler controller preflight --config config/local.toml
+prism-sampler controller replay /path/to/experiment --config config/local.toml
+prism-sampler run --config config/local.toml --yba-config /path/to/base.env \
+  --scenario config/scenarios/clickhouse-pressure-lifecycle.env \
+  --controller-mode shadow
+```
+
+`active` changes every target TID between node0 and node0+node1 with `taskset`.
+It requires readable `/proc/PID/task/TID/schedstat`, stable PID identities, and
+permission to change ClickHouse affinity. It does not migrate memory pages.
+
 Generated policies are always `candidate_only`, have no claimed expected gain,
 and render YBA profiles with `ENABLE_THREAD_CLUSTER=0` unless explicitly enabled.
 
 See [Architecture](docs/architecture.md), [Data Contract](docs/data-contract.md),
-and [Policy Schema](docs/policy-schema.md).
-
+[Policy Schema](docs/policy-schema.md), and
+[Pressure Controller](docs/pressure-aware-numa-scaling.md).

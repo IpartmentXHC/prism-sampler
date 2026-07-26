@@ -3,9 +3,9 @@
 ## Boundaries
 
 ```text
-YBA                 prism-sampler                     future controller
-service/workload -> phase hook -> collectors -> R -> candidate policy -> online decisions
-KPI/timeline         raw + telemetry DB3               affinity/rollback
+YBA                 prism-sampler                     controller prototype
+service/workload -> phase hook -> collectors -> R     pressure -> affinity
+KPI/timeline         raw + telemetry DB3              journal + rollback
 ```
 
 YBA remains authoritative for service readiness and workload timing. Its
@@ -16,6 +16,10 @@ Attach and flush time are outside the measured YCSB phase.
 The Rust `metric-collector` remains in the personal Prism fork pinned by
 `collector.lock`. Prism Sampler consumes its CLI and DuckDB schema; it does not
 copy the analysis UI or modify upstream ownership boundaries.
+
+The pressure controller is a separate target-local process. YBA hooks only
+start, mark, stop, and collect it. The collector never changes affinity, and
+the controller never reads workload labels to make decisions.
 
 ## Collection Lifecycle
 

@@ -6,6 +6,7 @@ build/
 dist/
 *.egg-info/
 config/local.toml
+config/local-*.env
 config/client.toml
 config/clickhouse.toml
 *.db3

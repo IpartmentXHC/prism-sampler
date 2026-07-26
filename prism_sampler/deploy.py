@@ -32,6 +32,18 @@ def _git_commit() -> str:
     ).stdout.strip()
 
 
+def _git_dirty() -> bool:
+    return bool(
+        subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+    )
+
+
 def build_bundle(
     output: Path,
     *,
@@ -92,11 +104,25 @@ def build_bundle(
             encoding="utf-8",
         )
         agent.chmod(0o755)
+        controller = stage / "bin" / "prism-numa-controller"
+        controller.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "ROOT=$(cd \"$(dirname \"$0\")/..\" && pwd)\n"
+            "export PYTHONPATH=\"$ROOT/python${PYTHONPATH:+:$PYTHONPATH}\"\n"
+            "exec python3 -m prism_sampler.controller.agent_cli \"$@\"\n",
+            encoding="utf-8",
+        )
+        controller.chmod(0o755)
         (stage / "prismctl").chmod(0o755)
         (stage / "capability-probe").chmod(0o755)
+        git_commit = _git_commit()
+        source_dirty = _git_dirty()
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "git_commit": _git_commit(),
+            "git_commit": git_commit,
+            "source_dirty": source_dirty,
+            "source_version": f"{git_commit}-dirty" if source_dirty else git_commit,
             "build_architecture": "aarch64",
             "build_kernel": source_kernel,
             "build_glibc": build_glibc,
@@ -105,6 +131,7 @@ def build_bundle(
             "full_support_kernel": "6.6",
             "best_effort_kernels": ["5.10", "6.12"],
             "agent": "bin/prism-sampler-agent",
+            "controller": "bin/prism-numa-controller",
         }
         (stage / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -134,7 +161,8 @@ def install_bundle(host: Host, bundle: Path, install_dir: str) -> None:
     host.run(
         f"mkdir -p {install} && tar -xzf {archive} -C {install} --strip-components=1 "
         f"&& chmod +x {install}/prismctl {install}/capability-probe "
-        f"{install}/bin/metric-collector {install}/bin/prism-sampler-agent"
+        f"{install}/bin/metric-collector {install}/bin/prism-sampler-agent "
+        f"{install}/bin/prism-numa-controller"
     )
 
 
@@ -167,6 +195,7 @@ def install_client(host: Host, install_dir: str, config: Path | None = None) -> 
             ("prism-sampler", "prism_sampler.cli"),
             ("prism-sampler-hook", "prism_sampler.hooks"),
             ("prism-sampler-agent", "prism_sampler.agent"),
+            ("prism-numa-controller", "prism_sampler.controller.agent_cli"),
         ):
             launcher = launcher_dir / name
             launcher.write_text(

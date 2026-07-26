@@ -38,6 +38,12 @@ TIDs in the same logical group to access the same resource. Experiment
 analysis is restricted to the exact YBA workload interval; collector attach and
 flush samples remain available in telemetry but do not contribute to R.
 
+An enabled pressure controller adds lifecycle-wide `controller/*.jsonl`
+artifacts. Postprocessing slices them by target-clock workload bounds and adds
+`controller_samples`, `controller_decisions`, and `controller_actions` to each
+phase's `telemetry.db3`. These tables record observed and realized state only;
+they do not contain a calibrated expected-gain G.
+
 The static scores are:
 
 ```text

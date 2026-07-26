@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -52,7 +53,16 @@ def preflight(config: SamplerConfig) -> dict[str, Any]:
     return result
 
 
-def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
+def run_yba(
+    config: SamplerConfig,
+    yba_config: Path,
+    scenario: Path,
+    *,
+    controller_mode: str | None = None,
+    experiment_name: str | None = None,
+) -> int:
+    yba_config = yba_config.resolve()
+    scenario = scenario.resolve()
     check = preflight(config)
     yba_root = Path(config.section("yba")["root"])
     yba = yba_root / "bin" / "yba"
@@ -67,11 +77,15 @@ def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
         f"{shlex.quote(sys.executable)} -m prism_sampler.hooks "
         f"--config {shlex.quote(str(config.source))}"
     )
+    if controller_mode:
+        local_hook += f" --controller-mode {shlex.quote(controller_mode)}"
     client = config.section("client")
     remote_hook = str(client.get("hook_command", "prism-sampler-hook"))
     remote_config = str(client.get("sampler_config", ""))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    experiment_name = "prism-sampler"
+    experiment_name = experiment_name or "prism-sampler"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", experiment_name):
+        raise ValueError(f"invalid experiment name: {experiment_name}")
     run_id = f"{stamp}-{experiment_name}"
     system = str(config.section("experiment").get("system", "unknown"))
     experiment_root = output_root / system / run_id
@@ -123,6 +137,9 @@ def run_yba(config: SamplerConfig, yba_config: Path, scenario: Path) -> int:
                     import_yba_kpi(run_dir, phase_dirs[0])
                     finalized_runs += 1
     if finalized_runs:
+        from ..controller.artifacts import import_controller_experiment
+
+        import_controller_experiment(experiment_root, yba_output=yba_output)
         _postprocess_experiment(experiment_root, finalized_runs, yba_returncode=returncode)
     return returncode
 

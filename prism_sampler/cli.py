@@ -9,6 +9,7 @@ from .collectors import CollectionSession, SessionContext
 from .artifacts import finalize_run
 from .calibration import calibrate_experiment
 from .config import load_config, read_toml
+from .controller.commands import controller_preflight, replay_experiment
 from .deploy import build_bundle, install_bundle, install_client, smoke_bundle
 from .hooks import handle
 from .orchestration import preflight, run_yba, run_yba_suite
@@ -43,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--config", required=True, type=Path)
     run.add_argument("--yba-config", required=True, type=Path)
     run.add_argument("--scenario", required=True, type=Path)
+    run.add_argument("--controller-mode", choices=["off", "shadow", "active"])
+    run.add_argument("--experiment-name")
     run_suite = commands.add_parser("run-suite")
     run_suite.add_argument("--config", required=True, type=Path)
     run_suite.add_argument("--yba-config", required=True, type=Path)
@@ -79,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
     cexp = calibrate_sub.add_parser("experiment")
     cexp.add_argument("experiment", type=Path)
     cexp.add_argument("--baseline", default="one_node")
+
+    controller = commands.add_parser("controller")
+    controller_sub = controller.add_subparsers(dest="controller_command", required=True)
+    controller_check = controller_sub.add_parser("preflight")
+    controller_check.add_argument("--config", required=True, type=Path)
+    controller_replay = controller_sub.add_parser("replay")
+    controller_replay.add_argument("experiment", type=Path)
+    controller_replay.add_argument("--config", required=True, type=Path)
 
     policy = commands.add_parser("policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
@@ -127,7 +138,13 @@ def main() -> None:
     elif args.command == "preflight":
         print(json.dumps(preflight(load_config(args.config)), indent=2, sort_keys=True))
     elif args.command == "run":
-        raise SystemExit(run_yba(load_config(args.config), args.yba_config, args.scenario))
+        raise SystemExit(run_yba(
+            load_config(args.config),
+            args.yba_config,
+            args.scenario,
+            controller_mode=args.controller_mode,
+            experiment_name=args.experiment_name,
+        ))
     elif args.command == "run-suite":
         raise SystemExit(run_yba_suite(
             load_config(args.config), args.yba_config, args.suite,
@@ -178,6 +195,12 @@ def main() -> None:
     elif args.command == "calibrate":
         print(json.dumps(calibrate_experiment(
             args.experiment, baseline=args.baseline
+        ), indent=2, sort_keys=True))
+    elif args.command == "controller" and args.controller_command == "preflight":
+        print(json.dumps(controller_preflight(load_config(args.config)), indent=2, sort_keys=True))
+    elif args.command == "controller":
+        print(json.dumps(replay_experiment(
+            args.experiment, load_config(args.config)
         ), indent=2, sort_keys=True))
     elif args.command == "policy" and args.policy_command == "generate":
         print(json.dumps(generate_policies(args.experiment, top_k=args.top_k), indent=2, sort_keys=True))

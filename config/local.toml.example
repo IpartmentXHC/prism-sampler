@@ -7,6 +7,8 @@ host = "kunpen183"
 sudo = "SUDO_ASKPASS=/absolute/path/to/askpass.sh sudo -A"
 remote_root = "/home/user/prism-sampler/data"
 agent_command = "/home/user/.local/bin/prism-sampler-agent"
+# Optional command prefix for affinity changes that require privilege.
+controller_command_prefix = "SUDO_ASKPASS=/absolute/path/to/askpass.sh sudo -A"
 
 [client]
 host = "ubuntu197"
@@ -27,3 +29,20 @@ root = "/home/user/ycsb-bench-all-database"
 profile = "policy"
 interval_seconds = 10
 platform = "kunpeng-920"
+
+[controller]
+mode = "off"
+sample_interval_seconds = 10
+decision_window_samples = 3
+one_node_nodes = [0]
+two_node_nodes = [0, 1]
+expand_run_pressure = 0.90
+expand_rq_pressure = 0.50
+shrink_run_cpu_equiv = 24.0
+shrink_rq_pressure = 0.05
+shrink_confirm_seconds = 180
+minimum_two_node_dwell_seconds = 300
+cooldown_seconds = 120
+actuator = "taskset"
+migrate_pages = false
+agent_command = "/home/user/prism-sampler/bin/prism-numa-controller"

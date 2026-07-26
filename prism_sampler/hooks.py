@@ -11,6 +11,8 @@ from typing import Any
 from .artifacts import validate_raw
 from .collectors import CollectionSession, SessionContext
 from .config import CONFIG_ROOT, SamplerConfig, load_config, read_toml
+from .controller.config import controller_config
+from .controller.integration import mark_controller, start_controller, stop_controller
 from .remote import Host
 
 
@@ -97,17 +99,51 @@ def _append_event(path: Path, event: str, context: dict[str, Any]) -> dict[str, 
     return phase
 
 
-def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
+def handle(
+    event: str,
+    context_path: Path,
+    config_path: Path,
+    *,
+    controller_mode: str | None = None,
+) -> dict[str, Any]:
     config = load_config(config_path)
+    controller = controller_config(config, mode_override=controller_mode)
     context = json.loads(context_path.read_text(encoding="utf-8"))
     session, phase, round_number = _identity(context)
-    if event in {"phase_before", "phase_after"} and not _collect_phase(config, phase):
-        return {"event": event, "status": "skipped", "phase": phase}
+    collect_phase = _collect_phase(config, phase)
+    if event in {"phase_before", "phase_after"} and not collect_phase:
+        scaling = mark_controller(
+            config,
+            controller,
+            session=session,
+            phase=phase,
+            active=event == "phase_before",
+        )
+        return {
+            "event": event,
+            "status": "skipped",
+            "phase": phase,
+            "controller": scaling,
+        }
     run_dir = _run_dir(config, context, session, phase, round_number)
     phase_path = run_dir / "meta" / "phase.json"
     phase_context = _append_event(phase_path, event, context)
     if event == "server_ready":
-        return {"event": event, "status": "recorded", "run_dir": str(run_dir)}
+        pids, starts = _discover_pids(config, context)
+        scaling = start_controller(
+            config,
+            controller,
+            session=session,
+            system=_system_name(config, context),
+            pids=pids,
+            start_times=starts,
+        )
+        return {
+            "event": event,
+            "status": "recorded",
+            "run_dir": str(run_dir),
+            "controller": scaling,
+        }
     if event == "phase_before":
         pids, starts = _discover_pids(config, context)
         phase_context["target_processes"] = [
@@ -149,8 +185,20 @@ def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
         _state_path(config, session, phase, round_number).write_text(
             json.dumps(state, indent=2, sort_keys=True, default=str) + "\n"
         )
-        return {"event": event, "status": "ready", "run_dir": str(run_dir), "pids": pids}
+        scaling = mark_controller(
+            config, controller, session=session, phase=phase, active=True
+        )
+        return {
+            "event": event,
+            "status": "ready",
+            "run_dir": str(run_dir),
+            "pids": pids,
+            "controller": scaling,
+        }
     if event == "phase_after":
+        scaling = mark_controller(
+            config, controller, session=session, phase=phase, active=False
+        )
         state_path = _state_path(config, session, phase, round_number)
         if not state_path.is_file():
             raise RuntimeError(f"collection state is missing: {state_path}")
@@ -168,8 +216,20 @@ def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
         phase_context = _append_event(phase_path, "collector_stopped", context)
         health = validate_raw(run_dir)
         state_path.unlink(missing_ok=True)
-        return {"event": event, "status": "complete", "run_dir": str(run_dir), "health": health}
+        return {
+            "event": event,
+            "status": "complete",
+            "run_dir": str(run_dir),
+            "health": health,
+            "controller": scaling,
+        }
     if event in {"run_abort", "cleanup"}:
+        scaling = stop_controller(
+            config,
+            controller,
+            session=session,
+            system=_system_name(config, context),
+        )
         stopped = []
         for state_path in _state_root(config).glob(f"{_safe(session)}-*.json"):
             state = json.loads(state_path.read_text())
@@ -185,7 +245,12 @@ def handle(event: str, context_path: Path, config_path: Path) -> dict[str, Any]:
             collector.stop(copy=False)
             state_path.unlink(missing_ok=True)
             stopped.append(saved["phase"])
-        return {"event": event, "status": "clean", "stopped": stopped}
+        return {
+            "event": event,
+            "status": "clean",
+            "stopped": stopped,
+            "controller": scaling,
+        }
     raise ValueError(f"unsupported hook event: {event}")
 
 
@@ -194,9 +259,15 @@ def main() -> None:
     parser.add_argument("event", choices=["server_ready", "phase_before", "phase_after", "run_abort", "cleanup"])
     parser.add_argument("context", type=Path)
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--controller-mode", choices=["off", "shadow", "active"])
     args = parser.parse_args()
     config = args.config or Path(str(context_config(args.context)))
-    print(json.dumps(handle(args.event, args.context, config), indent=2, sort_keys=True))
+    print(json.dumps(handle(
+        args.event,
+        args.context,
+        config,
+        controller_mode=args.controller_mode,
+    ), indent=2, sort_keys=True))
 
 
 def context_config(context_path: Path) -> str:
