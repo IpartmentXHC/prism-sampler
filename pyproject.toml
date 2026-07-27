@@ -22,6 +22,7 @@ prism-sampler = "prism_sampler.cli:main"
 prism-sampler-hook = "prism_sampler.hooks:main"
 prism-sampler-agent = "prism_sampler.agent:main"
 prism-numa-controller = "prism_sampler.controller.agent_cli:main"
+prism-live-analyzer = "prism_sampler.live.agent:main"
 
 [tool.setuptools.packages.find]
 include = ["prism_sampler*"]

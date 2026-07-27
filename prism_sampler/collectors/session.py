@@ -142,6 +142,9 @@ class CollectionSession:
     def _log(self, plugin: str) -> str:
         return f"{self.remote_dir}/{plugin}.log"
 
+    def _live_socket(self) -> str:
+        return f"{self.remote_dir}/prism-live.sock"
+
     def _validate_pids(self) -> None:
         for pid in self.context.pids:
             result = self.host.run(
@@ -220,6 +223,21 @@ class CollectionSession:
             f"--duckdb-directory {shlex.quote(self.remote_dir)} --duckdb-file collector.db3"
         )
         help_text = self.host.run(f"env {env}{binary} --help", check=False).stdout
+        if "live-relations" in self.requested:
+            if "--live-socket" not in help_text:
+                raise RuntimeError(
+                    "online relationship profile requires collector --live-socket support"
+                )
+            relations = self.config.relations
+            interval_ms = int(relations.get("live_interval_ms", 1000))
+            queue_capacity = int(relations.get("live_queue_capacity", 64))
+            if interval_ms <= 0 or queue_capacity <= 0:
+                raise ValueError("live interval and queue capacity must be positive")
+            args += (
+                f" --live-socket {shlex.quote(self._live_socket())}"
+                f" --live-interval-ms {interval_ms}"
+                f" --live-queue-capacity {queue_capacity}"
+            )
         if "--platform-profile" in help_text and "--subsystems" in help_text:
             self.collector_cli_mode = "capability-aware"
             strict = bool(self.report and self.report.kernel.startswith("6.6"))
@@ -266,6 +284,41 @@ class CollectionSession:
                 f"{shlex.quote(agent)} --output {output} {args} --interval {interval}"
             ),
         )
+
+    def _start_live_relations(self) -> None:
+        relations = self.config.relations
+        agent = str(
+            self.config.target.get("live_analyzer_command", "prism-live-analyzer")
+        )
+        args = [
+            shlex.quote(agent),
+            "--socket",
+            shlex.quote(self._live_socket()),
+            "--output-dir",
+            shlex.quote(self.remote_dir),
+            "--window-seconds",
+            str(float(relations.get("window_seconds", 60))),
+            "--stability-window-seconds",
+            str(float(relations.get("stability_window_seconds", 10))),
+            "--emit-seconds",
+            str(float(relations.get("emit_seconds", 10))),
+            "--minimum-evidence-windows",
+            str(int(relations.get("minimum_evidence_windows", 3))),
+        ]
+        for pid in self.context.pids:
+            args.extend(("--pid", str(pid)))
+        for rule in relations.get("group_rules", []):
+            name = str(rule.get("name", ""))
+            pattern = str(rule.get("pattern", ""))
+            if not name or not pattern:
+                raise ValueError("relations.group_rules require name and pattern")
+            args.extend(("--group-rule", shlex.quote(f"{name}={pattern}")))
+        scales_file = relations.get("scales_file")
+        if scales_file:
+            args.extend(("--scales", shlex.quote(str(scales_file))))
+        if not bool(relations.get("record_snapshots", True)):
+            args.append("--no-record-snapshots")
+        self._start_process("live-relations", " ".join(args))
 
     def _start_perf_core(self) -> None:
         assert self.report is not None
@@ -333,6 +386,7 @@ class CollectionSession:
         self.report = probe(self.host)
         starters = {
             "prism": self._start_prism,
+            "live-relations": self._start_live_relations,
             "snapshot": self._start_snapshot,
             "perf-core": self._start_perf_core,
             "perf-uncore": self._start_perf_uncore,
@@ -419,6 +473,7 @@ class CollectionSession:
                 trace_status.error = "perf script failed: " + result.stderr.strip()
         expected = {
             "prism": "collector.db3",
+            "live-relations": "live-summary.json",
             "snapshot": "system-pressure.jsonl",
             "perf-core": "perf-core.csv",
             "perf-uncore": "perf-uncore.csv",

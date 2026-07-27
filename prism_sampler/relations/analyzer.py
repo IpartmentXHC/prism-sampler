@@ -2,31 +2,18 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import statistics
-from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from .groups import GroupRule, group_name
+
 
 PAIR_FORMULA_ID = "sync_share_benefit_v2"
 SELF_FORMULA_ID = "sync_share_self_benefit_v1"
-
-
-@dataclass(frozen=True)
-class GroupRule:
-    name: str
-    pattern: str
-
-
-def _group_name(comm: str, rules: list[GroupRule]) -> str:
-    for rule in rules:
-        if re.search(rule.pattern, comm):
-            return rule.name
-    return comm
 
 
 def _pid_clause(pids: list[int], alias: str = "") -> str:
@@ -45,7 +32,7 @@ def _prepare_groups(con: Any, pids: list[int], rules: list[GroupRule]) -> None:
     con.execute("CREATE TEMP TABLE comm_groups(comm VARCHAR, group_name VARCHAR)")
     con.executemany(
         "INSERT INTO comm_groups VALUES (?, ?)",
-        [(comm, _group_name(comm, rules)) for comm in comms],
+        [(comm, group_name(comm, rules)) for comm in comms],
     )
 
 

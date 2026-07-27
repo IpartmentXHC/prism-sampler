@@ -56,3 +56,9 @@ R_self(i)   = 100 * Activity_i * Stability_i
 Synchronization contains attributed futex intensity, sharing contains selective
 VFS intensity, and relationship-window coverage appears only in stability.
 Pair and self features use separate experiment-wide P95 log scales.
+
+The optional `online-relationship` profile additionally writes Prism live
+snapshots and rolling shadow candidates under `raw/`. Online R uses separate
+`*_live_v1` formula IDs, window-level repeatability, and explicit stream/TID
+confidence. See [Live Relationship Analysis](live-relationships.md); live
+output does not replace DB3 or authorize affinity changes.

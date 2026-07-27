@@ -15,8 +15,7 @@ from .hooks import handle
 from .orchestration import preflight, run_yba, run_yba_suite
 from .platform import probe, write_report
 from .policies import generate_policies, render_yba, validate_policy
-from .relations import analyze_db, analyze_experiment
-from .relations.analyzer import GroupRule
+from .relations import GroupRule, analyze_db, analyze_experiment
 from .remote import Host
 
 

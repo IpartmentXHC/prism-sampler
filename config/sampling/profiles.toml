@@ -6,6 +6,10 @@ optional = ["phase-marker"]
 required = ["prism", "snapshot"]
 optional = ["phase-marker"]
 
+[profiles.online-relationship]
+required = ["prism", "live-relations", "snapshot"]
+optional = ["phase-marker"]
+
 [profiles.policy]
 required = ["prism", "snapshot"]
 optional = ["perf-core", "perf-uncore", "phase-marker"]

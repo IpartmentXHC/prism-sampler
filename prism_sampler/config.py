@@ -50,6 +50,10 @@ class SamplerConfig:
     def sampling(self) -> dict[str, Any]:
         return self.section("sampling")
 
+    @property
+    def relations(self) -> dict[str, Any]:
+        return self.section("relations")
+
     def digest(self) -> str:
         payload = json.dumps(self.values, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(payload).hexdigest()

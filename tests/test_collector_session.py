@@ -42,6 +42,83 @@ class SnapshotCommandTest(unittest.TestCase):
         self.assertIn("--pid 123", command)
 
 
+class LiveRelationshipCommandTest(unittest.TestCase):
+    def make_session(self) -> CollectionSession:
+        config = Mock()
+        config.target = {
+            "host": "local",
+            "sudo": "sudo -n",
+            "remote_root": "/tmp/prism-sampler",
+            "live_analyzer_command": "/opt/prism-live-analyzer",
+        }
+        config.collector = {
+            "binary": "/opt/metric-collector",
+            "attach_wait_seconds": 0,
+            "startup_attempts": 1,
+        }
+        config.sampling = {"profile": "online-relationship"}
+        config.relations = {
+            "live_interval_ms": 500,
+            "live_queue_capacity": 32,
+            "window_seconds": 60,
+            "emit_seconds": 10,
+            "minimum_evidence_windows": 3,
+            "group_rules": [{"name": "Worker", "pattern": "^worker"}],
+        }
+        config.values = {
+            "sampling_profiles": {
+                "online-relationship": {
+                    "required": ["prism", "live-relations"],
+                    "optional": [],
+                }
+            }
+        }
+        return CollectionSession(
+            config,
+            SessionContext(
+                session_id="test",
+                phase="load",
+                round=1,
+                pids=(123,),
+                pid_start_times={},
+                local_run_dir=Path("/tmp/prism-sampler-test"),
+            ),
+        )
+
+    def test_prism_enables_live_socket_only_for_live_profile(self):
+        session = self.make_session()
+        session.host.run = Mock(
+            return_value=Mock(
+                stdout="--live-socket --platform-profile --subsystems"
+            )
+        )
+
+        with (
+            patch.object(session, "_start_process") as start,
+            patch.object(session, "_assert_process_alive"),
+            patch.object(session, "_validate_pids"),
+        ):
+            session._start_prism()
+
+        command = start.call_args.args[1]
+        self.assertIn("--live-socket /tmp/prism-sampler/test/load/r1/prism-live.sock", command)
+        self.assertIn("--live-interval-ms 500", command)
+        self.assertIn("--live-queue-capacity 32", command)
+
+    def test_live_analyzer_is_shadow_only_and_receives_group_rules(self):
+        session = self.make_session()
+
+        with patch.object(session, "_start_process") as start:
+            session._start_live_relations()
+
+        plugin, command = start.call_args.args
+        self.assertEqual(plugin, "live-relations")
+        self.assertIn("/opt/prism-live-analyzer", command)
+        self.assertIn("--pid 123", command)
+        self.assertIn("--group-rule 'Worker=^worker'", command)
+        self.assertNotIn("taskset", command)
+
+
 class PrismStartupTest(unittest.TestCase):
     def make_session(self) -> CollectionSession:
         config = Mock()

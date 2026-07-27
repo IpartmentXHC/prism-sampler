@@ -1,9 +1,11 @@
 # Prism Sampler
 
-Prism Sampler is a Kunpeng-first collection and offline NUMA policy toolkit.
+Prism Sampler is a Kunpeng-first collection and NUMA policy research toolkit.
 YBA owns database lifecycle, workload execution, throughput, and latency. This
 repository owns eBPF/PMU/NUMA telemetry, relationship analysis, and guarded
-candidate policy generation. The `pressure-aware-numa-scaling` branch also
+candidate policy generation. It can consume Prism's live Unix-socket stream to
+maintain shadow-only rolling `R_pair` and `R_self` candidates. The
+`pressure-aware-numa-scaling` branch also
 contains an experimental ClickHouse node-level pressure controller; it remains
 disabled unless `--controller-mode shadow|active` is selected explicitly.
 
@@ -53,6 +55,22 @@ permission to change ClickHouse affinity. It does not migrate memory pages.
 Generated policies are always `candidate_only`, have no claimed expected gain,
 and render YBA profiles with `ENABLE_THREAD_CLUSTER=0` unless explicitly enabled.
 
+Enable live relationship shadow analysis explicitly in the sampler config:
+
+```toml
+[sampling]
+profile = "online-relationship"
+
+[relations]
+window_seconds = 60
+stability_window_seconds = 10
+emit_seconds = 10
+```
+
+This starts `prism-live-analyzer` next to the collector and writes live stream
+health and candidates without invoking `taskset`.
+
 See [Architecture](docs/architecture.md), [Data Contract](docs/data-contract.md),
 [Policy Schema](docs/policy-schema.md), and
 [Pressure Controller](docs/pressure-aware-numa-scaling.md).
+See also [Live Relationship Analysis](docs/live-relationships.md).

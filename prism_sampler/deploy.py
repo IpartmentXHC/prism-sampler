@@ -114,6 +114,16 @@ def build_bundle(
             encoding="utf-8",
         )
         controller.chmod(0o755)
+        live_analyzer = stage / "bin" / "prism-live-analyzer"
+        live_analyzer.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "ROOT=$(cd \"$(dirname \"$0\")/..\" && pwd)\n"
+            "export PYTHONPATH=\"$ROOT/python${PYTHONPATH:+:$PYTHONPATH}\"\n"
+            "exec python3 -m prism_sampler.live.agent \"$@\"\n",
+            encoding="utf-8",
+        )
+        live_analyzer.chmod(0o755)
         (stage / "prismctl").chmod(0o755)
         (stage / "capability-probe").chmod(0o755)
         git_commit = _git_commit()
@@ -132,6 +142,7 @@ def build_bundle(
             "best_effort_kernels": ["5.10", "6.12"],
             "agent": "bin/prism-sampler-agent",
             "controller": "bin/prism-numa-controller",
+            "live_analyzer": "bin/prism-live-analyzer",
         }
         (stage / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -162,7 +173,7 @@ def install_bundle(host: Host, bundle: Path, install_dir: str) -> None:
         f"mkdir -p {install} && tar -xzf {archive} -C {install} --strip-components=1 "
         f"&& chmod +x {install}/prismctl {install}/capability-probe "
         f"{install}/bin/metric-collector {install}/bin/prism-sampler-agent "
-        f"{install}/bin/prism-numa-controller"
+        f"{install}/bin/prism-numa-controller {install}/bin/prism-live-analyzer"
     )
 
 
@@ -196,6 +207,7 @@ def install_client(host: Host, install_dir: str, config: Path | None = None) -> 
             ("prism-sampler-hook", "prism_sampler.hooks"),
             ("prism-sampler-agent", "prism_sampler.agent"),
             ("prism-numa-controller", "prism_sampler.controller.agent_cli"),
+            ("prism-live-analyzer", "prism_sampler.live.agent"),
         ):
             launcher = launcher_dir / name
             launcher.write_text(
