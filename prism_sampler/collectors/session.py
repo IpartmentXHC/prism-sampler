@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shutil
 import shlex
 import subprocess
@@ -13,6 +15,27 @@ from ..config import SamplerConfig
 from ..platform import PlatformReport, probe
 from ..remote import Host
 from ..sidecars import discover_uncore_events, select_core_events
+
+
+SUBSYSTEM_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def _subsystem_names(value: Any, *, field: str, default: list[str]) -> list[str]:
+    if value is None:
+        names = default
+    elif isinstance(value, str):
+        names = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        names = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ValueError(f"collector.{field} must be a list or comma-separated string")
+    names = list(dict.fromkeys(names))
+    if not names:
+        raise ValueError(f"collector.{field} must not be empty")
+    invalid = [name for name in names if not SUBSYSTEM_NAME.fullmatch(name)]
+    if invalid:
+        raise ValueError(f"collector.{field} contains invalid names: {', '.join(invalid)}")
+    return names
 
 
 def measure_clock_offset(host: Host, samples: int = 5) -> dict[str, int]:
@@ -143,7 +166,8 @@ class CollectionSession:
         return f"{self.remote_dir}/{plugin}.log"
 
     def _live_socket(self) -> str:
-        return f"{self.remote_dir}/prism-live.sock"
+        digest = hashlib.sha256(self.remote_dir.encode("utf-8")).hexdigest()[:20]
+        return f"/tmp/prism-live-{digest}.sock"
 
     def _validate_pids(self) -> None:
         for pid in self.context.pids:
@@ -207,7 +231,11 @@ class CollectionSession:
         db = shlex.quote(f"{self.remote_dir}/collector.db3")
         wal = shlex.quote(f"{self.remote_dir}/collector.db3.wal")
         pidfile = shlex.quote(self._pidfile("prism"))
-        cleanup = f"test ! -e {log} || mv -f {log} {attempt_log}; rm -f {db} {wal} {pidfile}"
+        socket = shlex.quote(self._live_socket())
+        cleanup = (
+            f"test ! -e {log} || mv -f {log} {attempt_log}; "
+            f"rm -f {db} {wal} {pidfile} {socket}"
+        )
         self.host.run(
             self._prefix(f"sh -c {shlex.quote(cleanup)}"), check=False
         )
@@ -241,14 +269,34 @@ class CollectionSession:
         if "--platform-profile" in help_text and "--subsystems" in help_text:
             self.collector_cli_mode = "capability-aware"
             strict = bool(self.report and self.report.kernel.startswith("6.6"))
-            required = "taskstats,vfs,futex,iowait,net" if strict else "taskstats,futex,iowait"
-            requested = "taskstats,vfs,futex,iowait,aio,mux,net,discovery"
+            requested_names = _subsystem_names(
+                collector.get("subsystems"),
+                field="subsystems",
+                default=["taskstats", "vfs", "futex", "iowait", "aio", "mux", "net", "discovery"],
+            )
+            required_names = _subsystem_names(
+                collector.get("required_subsystems"),
+                field="required_subsystems",
+                default=(
+                    ["taskstats", "vfs", "futex", "iowait", "net"]
+                    if strict
+                    else ["taskstats", "futex", "iowait"]
+                ),
+            )
+            missing = [name for name in required_names if name not in requested_names]
+            if missing:
+                raise ValueError(
+                    "collector.required_subsystems must be included in collector.subsystems: "
+                    + ", ".join(missing)
+                )
+            requested = ",".join(requested_names)
+            required = ",".join(required_names)
             args += (
                 f" --platform-profile "
                 f"{'kunpeng' if self.report and self.report.profile == 'kunpeng' else 'generic-arm64'}"
                 f" --subsystems {requested} --required-subsystems {required}"
             )
-            if not strict:
+            if bool(collector.get("best_effort", not strict)):
                 args += " --best-effort"
         else:
             self.collector_cli_mode = "legacy"
@@ -425,6 +473,7 @@ class CollectionSession:
     def _reset_remote_dir(self) -> None:
         remote_dir = shlex.quote(self.remote_dir)
         self.host.run(self._prefix(f"rm -rf {remote_dir}"))
+        self.host.run(self._prefix(f"rm -f {shlex.quote(self._live_socket())}"))
         self.host.run(f"mkdir -p {remote_dir}")
 
     def health(self, state: str) -> dict[str, Any]:
@@ -458,6 +507,9 @@ class CollectionSession:
                 timeout_seconds=int(self.config.collector.get("stop_timeout_seconds", 30)),
                 command_prefix=self.sudo,
             )
+        self.host.run(
+            self._prefix(f"rm -f {shlex.quote(self._live_socket())}"), check=False
+        )
         trace_status = self.status.get("sched-trace")
         if trace_status and trace_status.started:
             data = shlex.quote(f"{self.remote_dir}/sched-events.data")

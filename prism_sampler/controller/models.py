@@ -20,6 +20,8 @@ class MetricSample:
     node_cpu_utilization: dict[str, float] = field(default_factory=dict)
     numa_pages: dict[str, int] = field(default_factory=dict)
     psi_cpu: dict[str, float] = field(default_factory=dict)
+    kpi: dict[str, Any] = field(default_factory=dict)
+    clickhouse_metrics: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

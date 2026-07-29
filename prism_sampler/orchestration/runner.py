@@ -93,6 +93,7 @@ def run_yba(
     experiment_root.mkdir(parents=True, exist_ok=True)
     env.update({
         "ENABLE_METRICS": "0",
+        "ENABLE_REALTIME_KPI": "1",
         "ENABLE_THREAD_CLUSTER": "0",
         "ENABLE_EXTERNAL_HOOK": "1",
         "EXTERNAL_HOOK_COMMAND": local_hook,
@@ -178,6 +179,7 @@ def run_yba_suite(
     client = config.section("client")
     env.update({
         "ENABLE_METRICS": "0",
+        "ENABLE_REALTIME_KPI": "1",
         "ENABLE_EXTERNAL_HOOK": "1",
         "EXTERNAL_HOOK_COMMAND": local_hook,
         "EXTERNAL_HOOK_REMOTE_COMMAND": str(client.get("hook_command", "prism-sampler-hook")),
@@ -243,8 +245,20 @@ def _collect_suite_runs(config: SamplerConfig, experiment: Path, suite_dir: Path
         profile = values["profile"]
         label = values.get("load") or values.get("scenario")
         round_number = int(values["round"])
-        destination = experiment / "runs" / profile / label / f"r{round_number}"
-        if (destination / "dataset" / "telemetry.db3").is_file():
+        timeline = _timeline(yba_cell / "scenario-timeline.csv")
+        destination_labels = list(timeline) if len(timeline) > 1 else [label]
+        if destination_labels and all(
+            (
+                experiment
+                / "runs"
+                / profile
+                / destination_label
+                / f"r{round_number}"
+                / "dataset"
+                / "telemetry.db3"
+            ).is_file()
+            for destination_label in destination_labels
+        ):
             continue
         hook_id = f"{experiment.name}-{yba_cell.name}"
         remote = f"{client_output}/{system}/{hook_id}"
@@ -255,37 +269,41 @@ def _collect_suite_runs(config: SamplerConfig, experiment: Path, suite_dir: Path
                 raise RuntimeError(f"Prism Suite cell output is missing: {remote}")
             client_host.copy_from(remote, local_cell, recursive=True)
         prism_runs = sorted(local_cell.glob("runs/*/r*"))
-        if len(prism_runs) != 1:
-            raise RuntimeError(f"expected one Prism phase in Suite cell: {local_cell}")
-        source_run = prism_runs[0]
-        phase_path = source_run / "meta" / "phase.json"
-        phase = json.loads(phase_path.read_text())
-        source_phase = str(phase.get("phase", ""))
-        if not source_phase:
-            raise RuntimeError(f"collected Prism phase has no phase label: {phase_path}")
-        phase["profile"] = profile
-        phase["phase"] = label
-        phase["source_phase"] = source_phase
-        phase["round"] = round_number
-        timeline = _timeline(yba_cell / "scenario-timeline.csv")
-        bounds = timeline.get(source_phase)
-        if not bounds:
-            raise RuntimeError(
-                f"Suite calibration requires timeline phase {source_phase}: {yba_cell}"
-            )
-        phase.update(_target_workload_bounds(bounds, phase))
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_run, destination, dirs_exist_ok=True)
-        destination_phase = destination / "meta" / "phase.json"
-        destination_phase.write_text(json.dumps(phase, indent=2, sort_keys=True) + "\n")
-        finalize_run(destination, phase)
-        phase_dirs = sorted(yba_cell.glob(f"phases/*-{source_phase}"))
-        if len(phase_dirs) != 1:
-            raise RuntimeError(
-                f"expected one YBA phase directory for {source_phase}: {yba_cell}"
-            )
-        import_yba_kpi(destination, phase_dirs[0])
-        finalized += 1
+        if not prism_runs:
+            raise RuntimeError(f"expected Prism phases in Suite cell: {local_cell}")
+        for source_run in prism_runs:
+            phase_path = source_run / "meta" / "phase.json"
+            phase = json.loads(phase_path.read_text())
+            source_phase = str(phase.get("phase", ""))
+            if not source_phase:
+                raise RuntimeError(f"collected Prism phase has no phase label: {phase_path}")
+            destination_label = source_phase if len(prism_runs) > 1 else label
+            destination = experiment / "runs" / profile / destination_label / f"r{round_number}"
+            if (destination / "dataset" / "telemetry.db3").is_file():
+                continue
+            phase["profile"] = profile
+            phase["phase"] = destination_label
+            phase["source_phase"] = source_phase
+            phase["suite_target"] = label
+            phase["round"] = round_number
+            bounds = timeline.get(source_phase)
+            if not bounds:
+                raise RuntimeError(
+                    f"Suite calibration requires timeline phase {source_phase}: {yba_cell}"
+                )
+            phase.update(_target_workload_bounds(bounds, phase))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source_run, destination, dirs_exist_ok=True)
+            destination_phase = destination / "meta" / "phase.json"
+            destination_phase.write_text(json.dumps(phase, indent=2, sort_keys=True) + "\n")
+            finalize_run(destination, phase)
+            phase_dirs = sorted(yba_cell.glob(f"phases/*-{source_phase}"))
+            if len(phase_dirs) != 1:
+                raise RuntimeError(
+                    f"expected one YBA phase directory for {source_phase}: {yba_cell}"
+                )
+            import_yba_kpi(destination, phase_dirs[0])
+            finalized += 1
         client_host.run(f"rm -rf {shlex.quote(remote)}", check=False)
         shutil.rmtree(local_cell, ignore_errors=True)
     if incoming.exists() and not any(incoming.iterdir()):

@@ -14,6 +14,17 @@ from .deploy import build_bundle, install_bundle, install_client, smoke_bundle
 from .hooks import handle
 from .orchestration import preflight, run_yba, run_yba_suite
 from .platform import probe, write_report
+from .pressure_v2 import (
+    analyze_calibration,
+    analyze_combined_calibration,
+    prepare_finalist_suite,
+    analyze_g,
+    analyze_closed_loop,
+    prepare_static_suite,
+    prepare_crossover_scenario,
+    render_controller_config,
+)
+from .pressure_v2_runner import execute as execute_pressure_v2
 from .policies import generate_policies, render_yba, validate_policy
 from .relations import GroupRule, analyze_db, analyze_experiment
 from .remote import Host
@@ -89,6 +100,47 @@ def build_parser() -> argparse.ArgumentParser:
     controller_replay = controller_sub.add_parser("replay")
     controller_replay.add_argument("experiment", type=Path)
     controller_replay.add_argument("--config", required=True, type=Path)
+
+    pressure = commands.add_parser("pressure-v2")
+    pressure_sub = pressure.add_subparsers(dest="pressure_command", required=True)
+    pressure_calibration = pressure_sub.add_parser("analyze-calibration")
+    pressure_calibration.add_argument("suite_dir", type=Path)
+    pressure_calibration.add_argument("--output", required=True, type=Path)
+    pressure_finalists = pressure_sub.add_parser("prepare-finalists")
+    pressure_finalists.add_argument("selected", type=Path)
+    pressure_finalists.add_argument("--output", required=True, type=Path)
+    pressure_combined = pressure_sub.add_parser("analyze-combined")
+    pressure_combined.add_argument("suite_dir", nargs="+", type=Path)
+    pressure_combined.add_argument("--output", required=True, type=Path)
+    pressure_combined.add_argument("--preliminary", type=Path)
+    pressure_g = pressure_sub.add_parser("analyze-g")
+    pressure_g.add_argument("experiment", nargs="+", type=Path)
+    pressure_g.add_argument("--selected", required=True, type=Path)
+    pressure_g.add_argument("--output", required=True, type=Path)
+    pressure_closed = pressure_sub.add_parser("analyze-closed-loop")
+    pressure_closed.add_argument("--static-suite", required=True, type=Path)
+    pressure_closed.add_argument("--dynamic", nargs="+", required=True, type=Path)
+    pressure_closed.add_argument("--output", required=True, type=Path)
+    pressure_static = pressure_sub.add_parser("prepare-static-suite")
+    pressure_static.add_argument("selected", type=Path)
+    pressure_static.add_argument("--output", required=True, type=Path)
+    pressure_crossover = pressure_sub.add_parser("prepare-crossover")
+    pressure_crossover.add_argument("load", choices=["C2T2", "C4T6", "C5T16"])
+    pressure_crossover.add_argument("--output", required=True, type=Path)
+    pressure_runtime = pressure_sub.add_parser("render-controller-config")
+    pressure_runtime.add_argument("selected", type=Path)
+    pressure_runtime.add_argument("--output", required=True, type=Path)
+    pressure_runtime.add_argument("--target-host", required=True)
+    pressure_runtime.add_argument("--output-root", required=True)
+    pressure_runtime.add_argument("--mode", choices=["off", "shadow", "active"], required=True)
+    pressure_runtime.add_argument("--initial-state", choices=["one_node", "two_node"], default="one_node")
+    pressure_runtime.add_argument("--transition", action="append", default=[])
+    pressure_runtime.add_argument("--sampling-profile", default="pressure-v2")
+    pressure_execute = pressure_sub.add_parser("execute-after-gate-a")
+    pressure_execute.add_argument("--root", required=True, type=Path)
+    pressure_execute.add_argument("--gate-a", required=True, type=Path)
+    pressure_execute.add_argument("--base-config", required=True, type=Path)
+    pressure_execute.add_argument("--calibration-config", required=True, type=Path)
 
     policy = commands.add_parser("policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
@@ -201,6 +253,61 @@ def main() -> None:
         print(json.dumps(replay_experiment(
             args.experiment, load_config(args.config)
         ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "analyze-calibration":
+        print(json.dumps(
+            analyze_calibration(args.suite_dir, args.output),
+            indent=2,
+            sort_keys=True,
+        ))
+    elif args.command == "pressure-v2" and args.pressure_command == "prepare-finalists":
+        print(json.dumps(
+            prepare_finalist_suite(args.selected, args.output),
+            indent=2,
+            sort_keys=True,
+        ))
+    elif args.command == "pressure-v2" and args.pressure_command == "analyze-g":
+        print(json.dumps(
+            analyze_g(args.experiment, args.selected, args.output),
+            indent=2,
+            sort_keys=True,
+        ))
+    elif args.command == "pressure-v2" and args.pressure_command == "analyze-closed-loop":
+        print(json.dumps(
+            analyze_closed_loop(args.static_suite, args.dynamic, args.output),
+            indent=2,
+            sort_keys=True,
+        ))
+    elif args.command == "pressure-v2" and args.pressure_command == "prepare-static-suite":
+        print(json.dumps(
+            prepare_static_suite(args.selected, args.output), indent=2, sort_keys=True
+        ))
+    elif args.command == "pressure-v2" and args.pressure_command == "prepare-crossover":
+        print(json.dumps(
+            prepare_crossover_scenario(args.load, args.output), indent=2, sort_keys=True
+        ))
+    elif args.command == "pressure-v2" and args.pressure_command == "render-controller-config":
+        print(json.dumps(render_controller_config(
+            args.selected,
+            args.output,
+            target_host=args.target_host,
+            output_root=args.output_root,
+            mode=args.mode,
+            initial_state=args.initial_state,
+            scripted_transitions=args.transition,
+            sampling_profile=args.sampling_profile,
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "execute-after-gate-a":
+        print(json.dumps(execute_pressure_v2(
+            args.root, args.gate_a, args.base_config, args.calibration_config
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2":
+        print(json.dumps(
+            analyze_combined_calibration(
+                args.suite_dir, args.output, args.preliminary
+            ),
+            indent=2,
+            sort_keys=True,
+        ))
     elif args.command == "policy" and args.policy_command == "generate":
         print(json.dumps(generate_policies(args.experiment, top_k=args.top_k), indent=2, sort_keys=True))
     elif args.command == "policy" and args.policy_command == "validate":

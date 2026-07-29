@@ -63,6 +63,18 @@ def _import_tables(
         "node_cpu_json": json.dumps(row.get("node_cpu_utilization", {}), sort_keys=True),
         "numa_pages_json": json.dumps(row.get("numa_pages", {}), sort_keys=True),
         "psi_cpu_json": json.dumps(row.get("psi_cpu", {}), sort_keys=True),
+        "kpi_throughput_ops_s": row.get("kpi", {}).get("throughput_ops_s"),
+        "kpi_p99_latency_us": row.get("kpi", {}).get("max_client_p99_latency_us"),
+        "kpi_error_delta": row.get("kpi", {}).get("error_count_delta"),
+        "kpi_timeout_delta": row.get("kpi", {}).get("timeout_count_delta"),
+        "query_threads": row.get("clickhouse_metrics", {}).get("QueryThread"),
+        "global_threads_active": row.get("clickhouse_metrics", {}).get("GlobalThreadActive"),
+        "global_threads_scheduled": row.get("clickhouse_metrics", {}).get("GlobalThreadScheduled"),
+        "configured_slots": row.get("clickhouse_metrics", {}).get("configured_slots"),
+        "kpi_json": json.dumps(row.get("kpi", {}), sort_keys=True),
+        "clickhouse_metrics_json": json.dumps(
+            row.get("clickhouse_metrics", {}), sort_keys=True
+        ),
         "error": row.get("error"),
     } for row in samples]
     decision_rows = [{
@@ -75,6 +87,10 @@ def _import_tables(
         "reason": row.get("reason", ""),
         "expand_matches": int(row.get("expand_matches") or 0),
         "shrink_elapsed_seconds": float(row.get("shrink_elapsed_seconds") or 0),
+        "decision_source": row.get("decision_source", ""),
+        "expected_gain_pct": row.get("expected_gain_pct"),
+        "signature_threads": row.get("signature_threads"),
+        "signature_distance": row.get("signature_distance"),
     } for row in decisions]
     action_rows = [{
         "realtime_ns": int(row.get("realtime_ns") or row.get("started_realtime_ns") or 0),
@@ -95,12 +111,17 @@ def _import_tables(
             "actual_state VARCHAR, workload_active BOOLEAN, valid BOOLEAN, interval_seconds DOUBLE, "
             "run_cpu_equiv DOUBLE, rq_cpu_equiv DOUBLE, run_pressure DOUBLE, rq_pressure DOUBLE, "
             "tids_observed INTEGER, node_cpu_json VARCHAR, numa_pages_json VARCHAR, "
-            "psi_cpu_json VARCHAR, error VARCHAR"
+            "psi_cpu_json VARCHAR, kpi_throughput_ops_s DOUBLE, kpi_p99_latency_us DOUBLE, "
+            "kpi_error_delta BIGINT, kpi_timeout_delta BIGINT, query_threads DOUBLE, "
+            "global_threads_active DOUBLE, global_threads_scheduled DOUBLE, "
+            "configured_slots DOUBLE, kpi_json VARCHAR, clickhouse_metrics_json VARCHAR, "
+            "error VARCHAR"
         ),
         "controller_decisions": (
             "realtime_ns BIGINT, phase VARCHAR, mode VARCHAR, current_state VARCHAR, "
             "target_state VARCHAR, action VARCHAR, reason VARCHAR, expand_matches INTEGER, "
-            "shrink_elapsed_seconds DOUBLE"
+            "shrink_elapsed_seconds DOUBLE, decision_source VARCHAR, expected_gain_pct DOUBLE, "
+            "signature_threads INTEGER, signature_distance DOUBLE"
         ),
         "controller_actions": (
             "realtime_ns BIGINT, phase VARCHAR, mode VARCHAR, action VARCHAR, from_state VARCHAR, "

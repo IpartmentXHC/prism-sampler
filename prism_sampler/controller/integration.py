@@ -57,14 +57,21 @@ def start_controller(
     local = local_controller_dir(config, system, session)
     local.mkdir(parents=True, exist_ok=True)
     runtime = local / "runtime-config.json"
-    write_json(runtime, {
+    runtime_value = {
         "schema": "prism-sampler.controller-launch.v1",
         "run_dir": remote,
         "controller": controller.to_dict(),
         "pids": pids,
         "start_times": {str(k): v for k, v in start_times.items()},
         "command_prefix": str(config.target.get("controller_command_prefix", "")),
-    })
+    }
+    if controller.benefit_signatures_file:
+        signature_path = Path(controller.benefit_signatures_file)
+        signature_value = json.loads(signature_path.read_text(encoding="utf-8"))
+        runtime_value["benefit_signatures"] = signature_value.get(
+            "signatures", signature_value
+        )
+    write_json(runtime, runtime_value)
     host.run(f"mkdir -p {shlex.quote(remote)}")
     remote_config = f"{remote}/runtime-config.json"
     host.copy_to(runtime, remote_config)

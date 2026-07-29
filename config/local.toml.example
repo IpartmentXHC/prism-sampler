@@ -14,11 +14,16 @@ controller_command_prefix = "SUDO_ASKPASS=/absolute/path/to/askpass.sh sudo -A"
 [client]
 host = "ubuntu197"
 hook_command = "/home/user/.local/bin/prism-sampler-hook"
+kpi_forwarder_command = "/home/user/.local/bin/prism-kpi-forwarder"
 sampler_config = "/home/user/.config/prism-sampler/local.toml"
 output_root = "/home/user/.local/share/prism-sampler/experiments"
 
 [collector]
 binary = "/home/user/prism/bin/metric-collector"
+# Optional calibration override; omitted values preserve the platform defaults.
+# subsystems = ["taskstats"]
+# required_subsystems = ["taskstats"]
+# best_effort = true
 runtime_lib = "/home/user/prism/lib"
 attach_wait_seconds = 12
 stop_timeout_seconds = 30

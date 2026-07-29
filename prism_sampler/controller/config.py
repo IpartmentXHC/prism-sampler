@@ -14,13 +14,27 @@ class ControllerConfig:
     decision_window_samples: int = 3
     one_node_nodes: tuple[int, ...] = (0,)
     two_node_nodes: tuple[int, ...] = (0, 1)
+    one_node_slots: int = 0
+    two_node_slots: int = 0
+    fixed_max_threads: int = 0
+    initial_state: str = "one_node"
+    scripted_transitions: tuple[str, ...] = ()
+    clickhouse_config_path: str = ""
+    clickhouse_preprocessed_config_path: str = ""
+    clickhouse_client_command: str = ""
+    benefit_signatures_file: str = ""
+    minimum_expected_gain_pct: float = 2.0
+    maximum_signature_distance: float = 0.75
     expand_run_pressure: float = 0.90
     expand_rq_pressure: float = 0.50
     shrink_run_cpu_equiv: float = 24.0
     shrink_rq_pressure: float = 0.05
     shrink_confirm_seconds: float = 180.0
-    minimum_two_node_dwell_seconds: float = 300.0
-    cooldown_seconds: float = 120.0
+    minimum_two_node_dwell_seconds: float = 60.0
+    cooldown_seconds: float = 60.0
+    settling_seconds: float = 20.0
+    rollback_throughput_drop_pct: float = 5.0
+    rollback_p99_increase_pct: float = 50.0
     rollback_confirm_samples: int = 2
     actuator: str = "taskset"
     migrate_pages: bool = False
@@ -33,6 +47,18 @@ class ControllerConfig:
             raise ValueError("the prototype only supports the taskset actuator")
         if self.migrate_pages:
             raise ValueError("page migration is not supported by the prototype")
+        if self.initial_state not in {"one_node", "two_node"}:
+            raise ValueError("controller.initial_state must be one_node or two_node")
+        previous = -1.0
+        for transition in self.scripted_transitions:
+            try:
+                raw_seconds, state = transition.split(":", 1)
+                seconds = float(raw_seconds)
+            except (ValueError, AttributeError) as exc:
+                raise ValueError(f"invalid scripted transition: {transition}") from exc
+            if seconds <= previous or state not in {"one_node", "two_node"}:
+                raise ValueError(f"invalid scripted transition: {transition}")
+            previous = seconds
         if self.sample_interval_seconds <= 0 or self.decision_window_samples <= 0:
             raise ValueError("controller sampling values must be positive")
         if not self.one_node_nodes or not self.two_node_nodes:
@@ -41,6 +67,14 @@ class ControllerConfig:
             raise ValueError("one_node_nodes must be a subset of two_node_nodes")
         if len(set(self.two_node_nodes)) != len(self.two_node_nodes):
             raise ValueError("controller node sets cannot contain duplicates")
+        if bool(self.one_node_slots or self.two_node_slots) != bool(
+            self.clickhouse_config_path and self.clickhouse_client_command
+        ):
+            raise ValueError(
+                "slot control requires both slots and ClickHouse config/client settings"
+            )
+        if bool(self.one_node_slots) != bool(self.two_node_slots):
+            raise ValueError("one_node_slots and two_node_slots must be configured together")
         for name in (
             "expand_run_pressure",
             "expand_rq_pressure",
@@ -49,7 +83,15 @@ class ControllerConfig:
             "shrink_confirm_seconds",
             "minimum_two_node_dwell_seconds",
             "cooldown_seconds",
+            "minimum_expected_gain_pct",
+            "maximum_signature_distance",
+            "settling_seconds",
+            "rollback_throughput_drop_pct",
+            "rollback_p99_increase_pct",
         ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"controller.{name} cannot be negative")
+        for name in ("one_node_slots", "two_node_slots", "fixed_max_threads"):
             if getattr(self, name) < 0:
                 raise ValueError(f"controller.{name} cannot be negative")
 
@@ -73,6 +115,10 @@ def controller_config(
     for name in ("one_node_nodes", "two_node_nodes"):
         if name in values:
             values[name] = tuple(int(item) for item in values[name])
+    if "scripted_transitions" in values:
+        values["scripted_transitions"] = tuple(
+            str(item) for item in values["scripted_transitions"]
+        )
     result = ControllerConfig(**values)
     result.validate()
     return result

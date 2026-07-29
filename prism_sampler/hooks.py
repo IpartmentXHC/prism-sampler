@@ -13,6 +13,7 @@ from .collectors import CollectionSession, SessionContext
 from .config import CONFIG_ROOT, SamplerConfig, load_config, read_toml
 from .controller.config import controller_config
 from .controller.integration import mark_controller, start_controller, stop_controller
+from .controller.kpi_integration import start_kpi_forwarder, stop_kpi_forwarder
 from .remote import Host
 
 
@@ -188,17 +189,25 @@ def handle(
         scaling = mark_controller(
             config, controller, session=session, phase=phase, active=True
         )
+        forwarding = start_kpi_forwarder(
+            config,
+            controller,
+            session=session,
+            yba_run_dir=Path(str(context["run_dir"])),
+        )
         return {
             "event": event,
             "status": "ready",
             "run_dir": str(run_dir),
             "pids": pids,
             "controller": scaling,
+            "kpi_forwarder": forwarding,
         }
     if event == "phase_after":
         scaling = mark_controller(
             config, controller, session=session, phase=phase, active=False
         )
+        forwarding = stop_kpi_forwarder(Path(str(context["run_dir"])))
         state_path = _state_path(config, session, phase, round_number)
         if not state_path.is_file():
             raise RuntimeError(f"collection state is missing: {state_path}")
@@ -222,6 +231,7 @@ def handle(
             "run_dir": str(run_dir),
             "health": health,
             "controller": scaling,
+            "kpi_forwarder": forwarding,
         }
     if event in {"run_abort", "cleanup"}:
         scaling = stop_controller(

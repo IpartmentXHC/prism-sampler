@@ -4,6 +4,8 @@ import os
 import shlex
 import subprocess
 import time
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +19,149 @@ def _run(command: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", "-lc", command], text=True, capture_output=True, check=False
     )
+
+
+class ClickHouseSlotsActuator:
+    METRICS = ("QueryThread", "GlobalThreadActive", "GlobalThreadScheduled")
+
+    def __init__(
+        self,
+        config_path: Path,
+        client_command: str,
+        *,
+        preprocessed_config_path: Path | None = None,
+        fixed_max_threads: int = 0,
+        runner: Runner = _run,
+    ):
+        self.config_path = config_path
+        self.client_command = client_command
+        self.preprocessed_config_path = preprocessed_config_path
+        self.runner = runner
+        self.fixed_max_threads = fixed_max_threads
+        self.original = config_path.read_bytes() if config_path.exists() else None
+        self.original_slots = self.current_slots()
+        if fixed_max_threads:
+            actual = int(self._query(
+                "SELECT value FROM system.settings WHERE name='max_threads'"
+            ))
+            if actual != fixed_max_threads:
+                raise RuntimeError(
+                    f"fixed max_threads verification failed: {actual} != {fixed_max_threads}"
+                )
+
+    def _query(self, sql: str) -> str:
+        command = f"{self.client_command} --query {shlex.quote(sql)}"
+        result = self.runner(command)
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"ClickHouse query failed: {detail}")
+        return result.stdout.strip()
+
+    def current_slots(self) -> int:
+        if self.preprocessed_config_path is not None:
+            root = ET.parse(self.preprocessed_config_path).getroot()
+            value = root.findtext("concurrent_threads_soft_limit_num")
+            if value is None:
+                raise RuntimeError(
+                    "concurrent_threads_soft_limit_num is missing from "
+                    f"{self.preprocessed_config_path}"
+                )
+            return int(value)
+        value = self._query(
+            "SELECT value FROM system.server_settings WHERE "
+            "name='concurrent_threads_soft_limit_num'"
+        )
+        return int(value)
+
+    def _write_slots(self, slots: int) -> None:
+        if self.config_path.exists():
+            root = ET.parse(self.config_path).getroot()
+        else:
+            root = ET.Element("clickhouse")
+        for name, value in (
+            ("concurrent_threads_soft_limit_num", slots),
+            ("concurrent_threads_soft_limit_ratio_to_cores", 0),
+        ):
+            element = root.find(name)
+            if element is None:
+                element = ET.SubElement(root, name)
+            element.text = str(value)
+        content = ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{self.config_path.name}.", dir=self.config_path.parent
+        )
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.config_path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    def apply(self, slots: int) -> dict[str, object]:
+        started = time.time_ns()
+        self._write_slots(slots)
+        self._query("SYSTEM RELOAD CONFIG")
+        actual = self.current_slots()
+        if actual != slots:
+            raise RuntimeError(f"slot verification failed: {actual} != {slots}")
+        return {
+            "status": "applied",
+            "slots": actual,
+            "verification_source": (
+                "preprocessed_config"
+                if self.preprocessed_config_path is not None
+                else "system.server_settings"
+            ),
+            "started_realtime_ns": started,
+            "finished_realtime_ns": time.time_ns(),
+        }
+
+    def metrics(self) -> dict[str, float]:
+        names = ",".join(f"'{name}'" for name in self.METRICS)
+        rows = self._query(
+            "SELECT metric || '=' || toString(value) FROM system.metrics "
+            f"WHERE metric IN ({names}) ORDER BY metric"
+        )
+        result: dict[str, float] = {}
+        for row in rows.splitlines():
+            if "=" in row:
+                name, value = row.split("=", 1)
+                result[name] = float(value)
+        return result
+
+    def restore(self) -> dict[str, object]:
+        if self.original is None:
+            self.config_path.unlink(missing_ok=True)
+        else:
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".{self.config_path.name}.", dir=self.config_path.parent
+            )
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(self.original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.config_path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        self._query("SYSTEM RELOAD CONFIG")
+        actual = self.current_slots()
+        if actual != self.original_slots:
+            raise RuntimeError(
+                f"slot restore verification failed: {actual} != {self.original_slots}"
+            )
+        return {
+            "status": "restored",
+            "slots": actual,
+            "verification_source": (
+                "preprocessed_config"
+                if self.preprocessed_config_path is not None
+                else "system.server_settings"
+            ),
+        }
 
 
 class TasksetActuator:

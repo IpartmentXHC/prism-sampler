@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,9 +102,21 @@ class LiveRelationshipCommandTest(unittest.TestCase):
             session._start_prism()
 
         command = start.call_args.args[1]
-        self.assertIn("--live-socket /tmp/prism-sampler/test/load/r1/prism-live.sock", command)
+        digest = hashlib.sha256(
+            "/tmp/prism-sampler/test/load/r1".encode("utf-8")
+        ).hexdigest()[:20]
+        self.assertIn(f"--live-socket /tmp/prism-live-{digest}.sock", command)
         self.assertIn("--live-interval-ms 500", command)
         self.assertIn("--live-queue-capacity 32", command)
+
+    def test_live_socket_path_is_bounded_for_long_session_names(self):
+        session = self.make_session()
+        session.remote_dir = "/home/xhc/prism-sampler/data/" + "x" * 300
+
+        socket_path = session._live_socket()
+
+        self.assertLess(len(socket_path.encode("utf-8")), 108)
+        self.assertTrue(socket_path.startswith("/tmp/prism-live-"))
 
     def test_live_analyzer_is_shadow_only_and_receives_group_rules(self):
         session = self.make_session()
@@ -189,16 +202,55 @@ class PrismStartupTest(unittest.TestCase):
 
         self.assertEqual(retry.call_count, 2)
 
+    def test_prism_uses_configured_collector_subsystems(self):
+        session = self.make_session()
+        session.config.collector.update({
+            "subsystems": ["taskstats"],
+            "required_subsystems": ["taskstats"],
+            "best_effort": True,
+        })
+        session.host.run = Mock(
+            return_value=Mock(stdout="--platform-profile --subsystems")
+        )
+
+        with (
+            patch.object(session, "_start_process") as start,
+            patch.object(session, "_assert_process_alive"),
+            patch.object(session, "_validate_pids"),
+        ):
+            session._start_prism()
+
+        command = start.call_args.args[1]
+        self.assertIn("--subsystems taskstats", command)
+        self.assertIn("--required-subsystems taskstats", command)
+        self.assertIn("--best-effort", command)
+        self.assertNotIn("taskstats,vfs", command)
+
+    def test_prism_rejects_required_subsystem_not_requested(self):
+        session = self.make_session()
+        session.config.collector.update({
+            "subsystems": ["taskstats"],
+            "required_subsystems": ["taskstats", "vfs"],
+        })
+        session.host.run = Mock(
+            return_value=Mock(stdout="--platform-profile --subsystems")
+        )
+
+        with self.assertRaisesRegex(ValueError, "must be included"):
+            session._start_prism()
+
     def test_remote_phase_directory_is_removed_with_privilege_then_created_as_user(self):
         session = self.make_session()
         session.host.run = Mock(return_value=Mock())
 
         session._reset_remote_dir()
 
-        self.assertEqual(session.host.run.call_count, 2)
+        self.assertEqual(session.host.run.call_count, 3)
         remove = session.host.run.call_args_list[0].args[0]
-        create = session.host.run.call_args_list[1].args[0]
+        remove_socket = session.host.run.call_args_list[1].args[0]
+        create = session.host.run.call_args_list[2].args[0]
         self.assertEqual(remove, "sudo -n rm -rf /tmp/prism-sampler/test/load/r1")
+        self.assertEqual(remove_socket, f"sudo -n rm -f {session._live_socket()}")
         self.assertEqual(create, "mkdir -p /tmp/prism-sampler/test/load/r1")
 
     def test_copy_replaces_stale_local_raw_directory(self):

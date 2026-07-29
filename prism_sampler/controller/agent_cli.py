@@ -5,9 +5,11 @@ import json
 import os
 import signal
 import time
+import sys
 from pathlib import Path
 
 from .journal import read_json, write_json
+from .kpi import ingest_stream
 from .metrics import process_start_time
 from .runtime import run
 
@@ -68,9 +70,14 @@ def main() -> None:
     stopping.add_argument("--timeout", type=float, default=30.0)
     status = commands.add_parser("status")
     status.add_argument("--run-dir", required=True, type=Path)
+    ingest = commands.add_parser("ingest-kpi")
+    ingest.add_argument("--run-dir", required=True, type=Path)
     args = parser.parse_args()
     if args.command == "run":
         run(args.runtime_config)
+        return
+    if args.command == "ingest-kpi":
+        ingest_stream(args.run_dir, sys.stdin, sys.stdout)
         return
     if args.command == "mark":
         result = mark(args.run_dir, active=args.active, phase=args.phase)

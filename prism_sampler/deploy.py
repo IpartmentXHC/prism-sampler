@@ -114,6 +114,16 @@ def build_bundle(
             encoding="utf-8",
         )
         controller.chmod(0o755)
+        kpi_forwarder = stage / "bin" / "prism-kpi-forwarder"
+        kpi_forwarder.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "ROOT=$(cd \"$(dirname \"$0\")/..\" && pwd)\n"
+            "export PYTHONPATH=\"$ROOT/python${PYTHONPATH:+:$PYTHONPATH}\"\n"
+            "exec python3 -m prism_sampler.controller.kpi_forwarder \"$@\"\n",
+            encoding="utf-8",
+        )
+        kpi_forwarder.chmod(0o755)
         live_analyzer = stage / "bin" / "prism-live-analyzer"
         live_analyzer.write_text(
             "#!/usr/bin/env bash\n"
@@ -142,6 +152,7 @@ def build_bundle(
             "best_effort_kernels": ["5.10", "6.12"],
             "agent": "bin/prism-sampler-agent",
             "controller": "bin/prism-numa-controller",
+            "kpi_forwarder": "bin/prism-kpi-forwarder",
             "live_analyzer": "bin/prism-live-analyzer",
         }
         (stage / "manifest.json").write_text(
@@ -173,7 +184,8 @@ def install_bundle(host: Host, bundle: Path, install_dir: str) -> None:
         f"mkdir -p {install} && tar -xzf {archive} -C {install} --strip-components=1 "
         f"&& chmod +x {install}/prismctl {install}/capability-probe "
         f"{install}/bin/metric-collector {install}/bin/prism-sampler-agent "
-        f"{install}/bin/prism-numa-controller {install}/bin/prism-live-analyzer"
+        f"{install}/bin/prism-numa-controller {install}/bin/prism-kpi-forwarder "
+        f"{install}/bin/prism-live-analyzer"
     )
 
 
@@ -207,6 +219,7 @@ def install_client(host: Host, install_dir: str, config: Path | None = None) -> 
             ("prism-sampler-hook", "prism_sampler.hooks"),
             ("prism-sampler-agent", "prism_sampler.agent"),
             ("prism-numa-controller", "prism_sampler.controller.agent_cli"),
+            ("prism-kpi-forwarder", "prism_sampler.controller.kpi_forwarder"),
             ("prism-live-analyzer", "prism_sampler.live.agent"),
         ):
             launcher = launcher_dir / name
@@ -217,7 +230,8 @@ def install_client(host: Host, install_dir: str, config: Path | None = None) -> 
                 f"exec python3 -m {module} \"$@\"\n",
                 encoding="utf-8",
             )
-            remote_launcher = f"{host.run('printf %s \"$HOME\"').stdout.strip()}/.local/bin/{name}"
+            remote_home = host.run("printf '%s' \"$HOME\"").stdout.strip()
+            remote_launcher = f"{remote_home}/.local/bin/{name}"
             host.run(f"mkdir -p {shlex.quote(str(Path(remote_launcher).parent))}")
             host.copy_to(launcher, remote_launcher)
             host.run(f"chmod +x {shlex.quote(remote_launcher)}")
