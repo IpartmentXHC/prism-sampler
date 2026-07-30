@@ -187,7 +187,15 @@ def handle(
             json.dumps(state, indent=2, sort_keys=True, default=str) + "\n"
         )
         scaling = mark_controller(
-            config, controller, session=session, phase=phase, active=True
+            config,
+            controller,
+            session=session,
+            phase=phase,
+            active=True,
+            relationship_candidates=(
+                f"{collector.remote_dir}/live-candidates-latest.json"
+                if controller.fine_placement_mode == "shadow" else ""
+            ),
         )
         forwarding = start_kpi_forwarder(
             config,

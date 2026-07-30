@@ -23,8 +23,14 @@ class ControllerConfig:
     clickhouse_preprocessed_config_path: str = ""
     clickhouse_client_command: str = ""
     benefit_signatures_file: str = ""
+    dynamic_model_file: str = ""
     minimum_expected_gain_pct: float = 2.0
     maximum_signature_distance: float = 0.75
+    maximum_model_distance: float = 2.5
+    gain_uncertainty_multiplier: float = 0.5
+    pressure_change_absolute: float = 0.15
+    pressure_change_relative: float = 0.25
+    pressure_change_confirm_samples: int = 3
     expand_run_pressure: float = 0.90
     expand_rq_pressure: float = 0.50
     shrink_run_cpu_equiv: float = 24.0
@@ -36,6 +42,11 @@ class ControllerConfig:
     rollback_throughput_drop_pct: float = 5.0
     rollback_p99_increase_pct: float = 50.0
     rollback_confirm_samples: int = 2
+    fine_placement_mode: str = "off"
+    fine_placement_pair_threshold: float = 10.0
+    fine_placement_self_threshold: float = 10.0
+    fine_placement_minimum_confidence: float = 0.7
+    fine_placement_cluster_size: int = 4
     actuator: str = "taskset"
     migrate_pages: bool = False
     agent_command: str = "/home/xhc/prism-sampler/bin/prism-numa-controller"
@@ -49,6 +60,8 @@ class ControllerConfig:
             raise ValueError("page migration is not supported by the prototype")
         if self.initial_state not in {"one_node", "two_node"}:
             raise ValueError("controller.initial_state must be one_node or two_node")
+        if self.fine_placement_mode not in {"off", "shadow"}:
+            raise ValueError("controller.fine_placement_mode must be off or shadow")
         previous = -1.0
         for transition in self.scripted_transitions:
             try:
@@ -85,15 +98,26 @@ class ControllerConfig:
             "cooldown_seconds",
             "minimum_expected_gain_pct",
             "maximum_signature_distance",
+            "maximum_model_distance",
+            "gain_uncertainty_multiplier",
+            "pressure_change_absolute",
+            "pressure_change_relative",
             "settling_seconds",
             "rollback_throughput_drop_pct",
             "rollback_p99_increase_pct",
+            "fine_placement_pair_threshold",
+            "fine_placement_self_threshold",
+            "fine_placement_minimum_confidence",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"controller.{name} cannot be negative")
         for name in ("one_node_slots", "two_node_slots", "fixed_max_threads"):
             if getattr(self, name) < 0:
                 raise ValueError(f"controller.{name} cannot be negative")
+        if self.pressure_change_confirm_samples <= 0:
+            raise ValueError("controller.pressure_change_confirm_samples must be positive")
+        if self.fine_placement_cluster_size <= 0:
+            raise ValueError("controller.fine_placement_cluster_size must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)

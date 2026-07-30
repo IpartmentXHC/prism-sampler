@@ -1,0 +1,19 @@
+{
+  "schema": "prism-sampler.hidden-workload.v1",
+  "seed": 20260741,
+  "controller_visible_phase_labels": true,
+  "controller_visible_load_identity": false,
+  "duration_seconds": 90,
+  "phases": [
+    {"phase": "w01", "load": "C4T4"},
+    {"phase": "w02", "load": "C5T8"},
+    {"phase": "w03", "load": "C1T1"},
+    {"phase": "w04", "load": "C10T12"},
+    {"phase": "w05", "load": "C4T6"},
+    {"phase": "w06", "load": "C5T16"},
+    {"phase": "w07", "load": "C1T1"},
+    {"phase": "w08", "load": "C3T4"},
+    {"phase": "w09", "load": "C4T16"},
+    {"phase": "w10", "load": "C2T4"}
+  ]
+}

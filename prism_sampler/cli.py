@@ -10,6 +10,12 @@ from .artifacts import finalize_run
 from .calibration import calibrate_experiment
 from .config import load_config, read_toml
 from .controller.commands import controller_preflight, replay_experiment
+from .controller.dynamic_model import (
+    build_dynamic_model,
+    replay_pressure_windows,
+    validate_hidden_active,
+    validate_hidden_shadow,
+)
 from .deploy import build_bundle, install_bundle, install_client, smoke_bundle
 from .hooks import handle
 from .orchestration import preflight, run_yba, run_yba_suite
@@ -136,11 +142,37 @@ def build_parser() -> argparse.ArgumentParser:
     pressure_runtime.add_argument("--initial-state", choices=["one_node", "two_node"], default="one_node")
     pressure_runtime.add_argument("--transition", action="append", default=[])
     pressure_runtime.add_argument("--sampling-profile", default="pressure-v2")
+    pressure_runtime.add_argument("--dynamic-model", type=Path)
+    pressure_runtime.add_argument("--minimum-expected-gain-pct", type=float, default=2.0)
+    pressure_runtime.add_argument("--controller-poll-seconds", type=float, default=10.0)
     pressure_execute = pressure_sub.add_parser("execute-after-gate-a")
     pressure_execute.add_argument("--root", required=True, type=Path)
     pressure_execute.add_argument("--gate-a", required=True, type=Path)
     pressure_execute.add_argument("--base-config", required=True, type=Path)
     pressure_execute.add_argument("--calibration-config", required=True, type=Path)
+    pressure_dynamic = pressure_sub.add_parser("build-dynamic-model")
+    pressure_dynamic.add_argument("--anchors", required=True, type=Path)
+    pressure_dynamic.add_argument("--pressure-model", required=True, type=Path)
+    pressure_dynamic.add_argument("--output", required=True, type=Path)
+    pressure_replay = pressure_sub.add_parser("replay-dynamic")
+    pressure_replay.add_argument("--windows", required=True, type=Path)
+    pressure_replay.add_argument("--model", required=True, type=Path)
+    pressure_replay.add_argument("--output", required=True, type=Path)
+    pressure_replay.add_argument("--minimum-expected-gain-pct", type=float, default=2.0)
+    pressure_replay.add_argument("--gain-uncertainty-multiplier", type=float, default=0.5)
+    pressure_shadow = pressure_sub.add_parser("validate-hidden-shadow")
+    pressure_shadow.add_argument("experiment", nargs="+", type=Path)
+    pressure_shadow.add_argument("--model", required=True, type=Path)
+    pressure_shadow.add_argument("--manifest", required=True, type=Path)
+    pressure_shadow.add_argument("--output", required=True, type=Path)
+    pressure_active = pressure_sub.add_parser("validate-hidden-active")
+    pressure_active.add_argument("active", type=Path)
+    pressure_active.add_argument("--static-one", required=True, type=Path)
+    pressure_active.add_argument("--static-two", required=True, type=Path)
+    pressure_active.add_argument("--manifest", required=True, type=Path)
+    pressure_active.add_argument("--output", required=True, type=Path)
+    pressure_active.add_argument("--equivalent-gain-pct", type=float, default=2.0)
+    pressure_active.add_argument("--settling-seconds", type=float, default=20.0)
 
     policy = commands.add_parser("policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
@@ -295,10 +327,39 @@ def main() -> None:
             initial_state=args.initial_state,
             scripted_transitions=args.transition,
             sampling_profile=args.sampling_profile,
+            dynamic_model_path=args.dynamic_model,
+            minimum_expected_gain_pct=args.minimum_expected_gain_pct,
+            controller_poll_seconds=args.controller_poll_seconds,
         ), indent=2, sort_keys=True))
     elif args.command == "pressure-v2" and args.pressure_command == "execute-after-gate-a":
         print(json.dumps(execute_pressure_v2(
             args.root, args.gate_a, args.base_config, args.calibration_config
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "build-dynamic-model":
+        print(json.dumps(build_dynamic_model(
+            args.anchors, args.pressure_model, args.output
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "replay-dynamic":
+        print(json.dumps(replay_pressure_windows(
+            args.windows,
+            args.model,
+            args.output,
+            minimum_expected_gain_pct=args.minimum_expected_gain_pct,
+            gain_uncertainty_multiplier=args.gain_uncertainty_multiplier,
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "validate-hidden-shadow":
+        print(json.dumps(validate_hidden_shadow(
+            args.experiment, args.model, args.manifest, args.output
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "validate-hidden-active":
+        print(json.dumps(validate_hidden_active(
+            args.active,
+            args.static_one,
+            args.static_two,
+            args.manifest,
+            args.output,
+            equivalent_gain_pct=args.equivalent_gain_pct,
+            settling_seconds=args.settling_seconds,
         ), indent=2, sort_keys=True))
     elif args.command == "pressure-v2":
         print(json.dumps(

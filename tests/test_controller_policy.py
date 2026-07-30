@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+
 from prism_sampler.controller.config import ControllerConfig
 from prism_sampler.controller.models import MetricSample
-from prism_sampler.controller.policy import BenefitPolicy, PressurePolicy, ScalingState
+from prism_sampler.controller.dynamic_model import GScaleModel
+from prism_sampler.controller.policy import (
+    BenefitPolicy,
+    ContinuousBenefitPolicy,
+    PressurePolicy,
+    ScalingState,
+)
 
 
 def sample(
@@ -199,3 +209,188 @@ def test_scripted_transitions_are_validated() -> None:
         initial_state="two_node",
         scripted_transitions=("90:one_node", "210:two_node"),
     ).validate()
+
+
+def dynamic_model() -> GScaleModel:
+    return GScaleModel({
+        "schema": "prism-sampler.pressure-g-scale.v1",
+        "pressure_reference": {
+            "reference_capacity_cpus": 32,
+            "coefficients": {"run_coefficient": 1.1, "rq_coefficient": 0.6},
+            "validation": {"leave_one_load_out_p95_absolute_error": 0.4},
+        },
+        "g_scale": {
+            "feature_scales": {
+                "pressure_ref": 0.2,
+                "log_throughput": 0.2,
+                "log_p99": 0.5,
+            }
+        },
+        "anchors": [
+            {
+                "label": "low",
+                "pressure_ref": 0.1,
+                "one_throughput_ops_s": 100.0,
+                "two_throughput_ops_s": 80.0,
+                "one_p99_us": 10.0,
+                "two_p99_us": 12.0,
+            },
+            {
+                "label": "high",
+                "pressure_ref": 1.5,
+                "one_throughput_ops_s": 100.0,
+                "two_throughput_ops_s": 180.0,
+                "one_p99_us": 100.0,
+                "two_p99_us": 50.0,
+            },
+        ],
+    })
+
+
+def dynamic_sample(
+    index: int,
+    *,
+    run: float,
+    rq: float,
+    throughput: float,
+    p99: float,
+    phase: str = "opaque",
+) -> MetricSample:
+    value = sample(index, run=run, rq=rq)
+    value.kpi.update({
+        "phase": phase,
+        "sequence": index,
+        "complete": True,
+        "throughput_ops_s": throughput,
+        "max_client_p99_latency_us": p99,
+        "offered_threads": 999,
+    })
+    return value
+
+
+def test_continuous_policy_uses_p_ref_without_profile_identity() -> None:
+    policy = ContinuousBenefitPolicy(
+        ControllerConfig(
+            cooldown_seconds=0,
+            gain_uncertainty_multiplier=0,
+        ),
+        dynamic_model(),
+    )
+    decision = None
+    for index in range(1, 4):
+        decision = policy.evaluate(dynamic_sample(
+            index, run=31, rq=17, throughput=100, p99=100,
+            phase="does-not-identify-the-load",
+        ))
+    assert decision is not None and decision.action == "expand"
+    assert decision.decision_source == "continuous_g_scale"
+    assert decision.nearest_anchor == "high"
+    assert decision.signature_threads is None
+
+
+def test_continuous_policy_maps_two_node_pressure_and_shrinks_low_load() -> None:
+    policy = ContinuousBenefitPolicy(
+        ControllerConfig(
+            cooldown_seconds=0,
+            minimum_two_node_dwell_seconds=0,
+            gain_uncertainty_multiplier=0,
+        ),
+        dynamic_model(),
+    )
+    policy.force_state(ScalingState.TWO_NODE, 0)
+    decision = None
+    for index in range(1, 4):
+        decision = policy.evaluate(dynamic_sample(
+            index, run=3, rq=0, throughput=80, p99=12
+        ))
+    assert decision is not None and decision.action == "shrink"
+    assert decision.pressure_ref == pytest.approx(1.1 * 3 / 32)
+
+
+def test_continuous_policy_retries_profitable_shrink_after_minimum_dwell() -> None:
+    policy = ContinuousBenefitPolicy(
+        ControllerConfig(
+            cooldown_seconds=0,
+            minimum_two_node_dwell_seconds=60,
+            gain_uncertainty_multiplier=0,
+        ),
+        dynamic_model(),
+    )
+    policy.force_state(ScalingState.TWO_NODE, 0)
+
+    decisions = [
+        policy.evaluate(dynamic_sample(
+            index, run=3, rq=0, throughput=80, p99=12
+        ))
+        for index in range(1, 7)
+    ]
+
+    assert decisions[2].reason == "minimum_two_node_dwell"
+    assert decisions[5].action == "shrink"
+    assert policy.state == ScalingState.ONE_NODE
+
+
+def test_continuous_policy_initial_two_node_has_no_artificial_dwell() -> None:
+    policy = ContinuousBenefitPolicy(
+        ControllerConfig(
+            cooldown_seconds=0,
+            minimum_two_node_dwell_seconds=300,
+            gain_uncertainty_multiplier=0,
+        ),
+        dynamic_model(),
+    )
+    policy.force_state(ScalingState.TWO_NODE)
+
+    decision = None
+    for index in range(1, 4):
+        decision = policy.evaluate(dynamic_sample(
+            index, run=3, rq=0, throughput=80, p99=12
+        ))
+
+    assert decision is not None and decision.action == "shrink"
+
+
+def test_continuous_policy_retries_positive_gain_after_confidence_gate() -> None:
+    config = ControllerConfig(
+        cooldown_seconds=0,
+        minimum_expected_gain_pct=100,
+        gain_uncertainty_multiplier=0,
+    )
+    policy = ContinuousBenefitPolicy(config, dynamic_model())
+    decision = None
+    for index in range(1, 4):
+        decision = policy.evaluate(dynamic_sample(
+            index, run=25, rq=10, throughput=100, p99=100
+        ))
+    assert decision is not None
+    assert decision.reason == "gain_lower_bound_below_gate"
+    assert policy.pending_rebase
+
+    policy.config = replace(config, minimum_expected_gain_pct=0)
+    decision = policy.evaluate(dynamic_sample(
+        4, run=25, rq=10, throughput=100, p99=100
+    ))
+    assert decision.action == "expand"
+
+
+def test_continuous_policy_holds_until_sustained_pressure_rebase() -> None:
+    policy = ContinuousBenefitPolicy(
+        ControllerConfig(
+            cooldown_seconds=0,
+            pressure_change_confirm_samples=3,
+            gain_uncertainty_multiplier=0,
+        ),
+        dynamic_model(),
+    )
+    for index in range(1, 4):
+        policy.evaluate(dynamic_sample(
+            index, run=3, rq=0, throughput=100, p99=10
+        ))
+    assert policy.pressure_baseline == pytest.approx(3 / 32)
+    decisions = []
+    for index in range(4, 8):
+        decisions.append(policy.evaluate(dynamic_sample(
+            index, run=25, rq=15, throughput=100, p99=100
+        )))
+    assert all(decision.action is None for decision in decisions[:3])
+    assert decisions[3].action == "expand"

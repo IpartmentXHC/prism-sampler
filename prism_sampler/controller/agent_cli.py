@@ -22,7 +22,13 @@ def _current(pid: int, start_time: int) -> bool:
         return False
 
 
-def mark(run_dir: Path, *, active: bool, phase: str) -> dict[str, object]:
+def mark(
+    run_dir: Path,
+    *,
+    active: bool,
+    phase: str,
+    relationship_candidates: str = "",
+) -> dict[str, object]:
     pid_record = read_json(run_dir / "controller.pid.json")
     if not pid_record or not _current(
         int(pid_record.get("pid", 0)), int(pid_record.get("start_time", 0))
@@ -33,6 +39,7 @@ def mark(run_dir: Path, *, active: bool, phase: str) -> dict[str, object]:
         "phase": phase,
         "realtime_ns": time.time_ns(),
         "monotonic_ns": time.monotonic_ns(),
+        "relationship_candidates": relationship_candidates,
     }
     write_json(run_dir / "control.json", value)
     return {"status": "marked", **value}
@@ -62,6 +69,7 @@ def main() -> None:
     marker = commands.add_parser("mark")
     marker.add_argument("--run-dir", required=True, type=Path)
     marker.add_argument("--phase", default="")
+    marker.add_argument("--relationship-candidates", default="")
     activity = marker.add_mutually_exclusive_group(required=True)
     activity.add_argument("--active", action="store_true")
     activity.add_argument("--inactive", action="store_true")
@@ -80,7 +88,12 @@ def main() -> None:
         ingest_stream(args.run_dir, sys.stdin, sys.stdout)
         return
     if args.command == "mark":
-        result = mark(args.run_dir, active=args.active, phase=args.phase)
+        result = mark(
+            args.run_dir,
+            active=args.active,
+            phase=args.phase,
+            relationship_candidates=args.relationship_candidates,
+        )
     elif args.command == "stop":
         result = stop(args.run_dir, args.timeout)
     else:

@@ -23,7 +23,7 @@ window_seconds = 60
 stability_window_seconds = 10
 emit_seconds = 10
 minimum_evidence_windows = 3
-record_snapshots = true
+record_snapshots = false
 ```
 
 `CollectionSession` then:
@@ -114,7 +114,7 @@ Missing optional data is never converted to a successful zero-valued sample.
 Each enabled phase adds:
 
 ```text
-raw/live-stream.jsonl              exact delivered Prism snapshots
+raw/live-stream.jsonl              exact snapshots, only when record_snapshots=true
 raw/live-candidates.jsonl          periodic rolling candidates
 raw/live-candidates-latest.json    atomic latest shadow decision input
 raw/live-summary.json              counts and final quality state
@@ -128,5 +128,8 @@ window boundaries, sequence range, scales, stream quality, directional
 ## Safety Boundary
 
 The live analyzer imports no controller actuator and emits no taskset command.
-Connecting candidates to placement requires a separately reviewed G model,
-capacity constraints, minimum confidence, dwell time, and rollback policy.
+The controller may consume `live-candidates-latest.json` in
+`fine_placement_mode="shadow"`. It records a capacity-constrained node/CPU-cluster
+partition in `controller/fine-placement.jsonl`, always with
+`apply_allowed=false`. Applying those candidates still requires a separately
+calibrated action-specific G, shadow evaluation, dwell, and rollback policy.

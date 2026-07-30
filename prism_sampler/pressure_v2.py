@@ -1119,6 +1119,9 @@ def render_controller_config(
     initial_state: str = "one_node",
     scripted_transitions: list[str] | None = None,
     sampling_profile: str = "pressure-v2",
+    dynamic_model_path: Path | None = None,
+    minimum_expected_gain_pct: float = 2.0,
+    controller_poll_seconds: float = 10.0,
 ) -> dict[str, Any]:
     selected = json.loads(selected_path.read_text(encoding="utf-8"))
     transitions = scripted_transitions or []
@@ -1160,7 +1163,7 @@ minimum_evidence_windows = 3
 record_snapshots = true
 [controller]
 mode = {json.dumps(mode)}
-sample_interval_seconds = 10
+sample_interval_seconds = {controller_poll_seconds}
 decision_window_samples = 3
 one_node_nodes = [0]
 two_node_nodes = [0, 1]
@@ -1173,13 +1176,24 @@ clickhouse_config_path = "/home/xhc/clickhouse/etc/config.d/90-yba-experiment.xm
 clickhouse_preprocessed_config_path = "/home/xhc/clickhouse/data/preprocessed_configs/config.xml"
 clickhouse_client_command = "/home/xhc/clickhouse/ClickHouse/build/programs/clickhouse-client --host 127.0.0.1 --port 9000"
 benefit_signatures_file = {json.dumps(str(selected_path.resolve()))}
-minimum_expected_gain_pct = 2
+dynamic_model_file = {json.dumps(str(dynamic_model_path.resolve()) if dynamic_model_path else "")}
+minimum_expected_gain_pct = {minimum_expected_gain_pct}
 maximum_signature_distance = 0.75
+maximum_model_distance = 2.5
+gain_uncertainty_multiplier = 0.5
+pressure_change_absolute = 0.15
+pressure_change_relative = 0.25
+pressure_change_confirm_samples = 3
 settling_seconds = 20
 minimum_two_node_dwell_seconds = 60
 cooldown_seconds = 60
 rollback_throughput_drop_pct = 5
 rollback_p99_increase_pct = 50
+fine_placement_mode = "shadow"
+fine_placement_pair_threshold = 10
+fine_placement_self_threshold = 10
+fine_placement_minimum_confidence = 0.7
+fine_placement_cluster_size = 4
 actuator = "taskset"
 migrate_pages = false
 agent_command = "/home/xhc/prism-sampler/bin/prism-numa-controller"

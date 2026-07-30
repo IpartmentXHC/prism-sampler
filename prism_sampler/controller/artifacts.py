@@ -91,6 +91,13 @@ def _import_tables(
         "expected_gain_pct": row.get("expected_gain_pct"),
         "signature_threads": row.get("signature_threads"),
         "signature_distance": row.get("signature_distance"),
+        "pressure_ref": row.get("pressure_ref"),
+        "gain_stddev_pct": row.get("gain_stddev_pct"),
+        "gain_lower_bound_pct": row.get("gain_lower_bound_pct"),
+        "model_distance": row.get("model_distance"),
+        "model_confidence": row.get("model_confidence"),
+        "nearest_anchor": row.get("nearest_anchor"),
+        "pressure_baseline": row.get("pressure_baseline"),
     } for row in decisions]
     action_rows = [{
         "realtime_ns": int(row.get("realtime_ns") or row.get("started_realtime_ns") or 0),
@@ -121,7 +128,9 @@ def _import_tables(
             "realtime_ns BIGINT, phase VARCHAR, mode VARCHAR, current_state VARCHAR, "
             "target_state VARCHAR, action VARCHAR, reason VARCHAR, expand_matches INTEGER, "
             "shrink_elapsed_seconds DOUBLE, decision_source VARCHAR, expected_gain_pct DOUBLE, "
-            "signature_threads INTEGER, signature_distance DOUBLE"
+            "signature_threads INTEGER, signature_distance DOUBLE, pressure_ref DOUBLE, "
+            "gain_stddev_pct DOUBLE, gain_lower_bound_pct DOUBLE, model_distance DOUBLE, "
+            "model_confidence DOUBLE, nearest_anchor VARCHAR, pressure_baseline DOUBLE"
         ),
         "controller_actions": (
             "realtime_ns BIGINT, phase VARCHAR, mode VARCHAR, action VARCHAR, from_state VARCHAR, "
@@ -221,7 +230,8 @@ def import_controller_experiment(
         f"- Controller actions: `{len(actions)}`",
         f"- Two-node residency: `{two:.1f}s / {total:.1f}s` ({(two / total if total else 0):.2%})",
         "",
-        "The controller reports realized state and pressure evidence only; no numeric G is claimed.",
+        "Continuous-policy decisions include calibrated P_ref, expected G_scale, uncertainty, "
+        "model distance, and the nearest explanatory anchor.",
     ]
     (controller / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     return {"status": "complete", "phases": imported, "samples": len(samples), "actions": len(actions)}

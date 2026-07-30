@@ -11,9 +11,17 @@ from typing import Any
 
 from .actuator import ClickHouseSlotsActuator, TasksetActuator
 from .config import ControllerConfig
+from .dynamic_model import GScaleModel
+from .fine_placement import FinePlacementShadow
 from .journal import append_jsonl, read_json, write_json
 from .metrics import ProcMetricSource, cpu_nodes, format_cpu_list, process_start_time
-from .policy import BenefitPolicy, Decision, PressurePolicy, ScalingState
+from .policy import (
+    BenefitPolicy,
+    ContinuousBenefitPolicy,
+    Decision,
+    PressurePolicy,
+    ScalingState,
+)
 
 
 def _runtime_controller_config(value: dict[str, Any]) -> ControllerConfig:
@@ -53,13 +61,18 @@ class ControllerRuntime:
         self.command_prefix = str(raw.get("command_prefix", ""))
         self.one_cpus = _cpus_for_nodes(self.config.one_node_nodes)
         self.two_cpus = _cpus_for_nodes(self.config.two_node_nodes)
+        self.node_cpus = cpu_nodes()
         self.one_capacity = len(set(int(cpu) for cpu in _expand(self.one_cpus)))
         signatures = list(raw.get("benefit_signatures", []))
-        self.policy = (
-            BenefitPolicy(self.config, signatures)
-            if signatures
-            else PressurePolicy(self.config)
-        )
+        dynamic_model = raw.get("dynamic_model")
+        if dynamic_model:
+            self.policy = ContinuousBenefitPolicy(
+                self.config, GScaleModel(dict(dynamic_model))
+            )
+        elif signatures:
+            self.policy = BenefitPolicy(self.config, signatures)
+        else:
+            self.policy = PressurePolicy(self.config)
         self.source = ProcMetricSource(self.pids, self.start_times)
         self.actuator = TasksetActuator(
             self.pids, self.start_times, command_prefix=self.command_prefix
@@ -85,6 +98,7 @@ class ControllerRuntime:
         self.kpi_history: list[dict[str, Any]] = []
         self.last_kpi_key: tuple[str, int] | None = None
         self.pending_validation: dict[str, Any] | None = None
+        self.fine_placement = FinePlacementShadow()
         self.current_phase = ""
         self.scripted = [
             (float(item.split(":", 1)[0]), ScalingState(item.split(":", 1)[1]))
@@ -306,6 +320,12 @@ class ControllerRuntime:
                 "start_times": {str(k): v for k, v in self.start_times.items()},
                 "one_node_cpus": self.one_cpus,
                 "two_node_cpus": self.two_cpus,
+                "policy": type(self.policy).__name__,
+                "dynamic_model_schema": (
+                    self.policy.model.raw.get("schema")
+                    if isinstance(self.policy, ContinuousBenefitPolicy)
+                    else None
+                ),
             },
         )
         if self.config.mode == "active":
@@ -342,6 +362,31 @@ class ControllerRuntime:
                     "actual_state": self.actual_state.value,
                 }
                 append_jsonl(self.run_dir / "samples.jsonl", sample_row)
+                if (
+                    self.config.fine_placement_mode == "shadow"
+                    and sample.workload_active
+                    and control.get("relationship_candidates")
+                ):
+                    available_nodes = (
+                        self.config.one_node_nodes
+                        if self.actual_state == ScalingState.ONE_NODE
+                        else self.config.two_node_nodes
+                    )
+                    placement = self.fine_placement.poll(
+                        Path(str(control["relationship_candidates"])),
+                        phase=str(control.get("phase", "")),
+                        scaling_state=self.actual_state.value,
+                        available_nodes=available_nodes,
+                        node_cpus=self.node_cpus,
+                        pair_threshold=self.config.fine_placement_pair_threshold,
+                        self_threshold=self.config.fine_placement_self_threshold,
+                        minimum_confidence=self.config.fine_placement_minimum_confidence,
+                        cluster_size=self.config.fine_placement_cluster_size,
+                    )
+                    if placement is not None:
+                        append_jsonl(
+                            self.run_dir / "fine-placement.jsonl", placement
+                        )
                 rolled_back = self._validate_pending_action(sample.monotonic_ns)
                 decision = self._scripted_decision(
                     sample, str(control.get("phase", ""))
@@ -364,6 +409,8 @@ class ControllerRuntime:
                     previous = self.actual_state
                     baseline = self._kpi_baseline()
                     result = self._action(decision.action, target)
+                    if self.config.mode == "shadow":
+                        self.policy.force_state(self.actual_state, sample.monotonic_ns)
                     if (
                         self.config.mode == "active"
                         and result.get("status") == "applied"

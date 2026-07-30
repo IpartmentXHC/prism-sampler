@@ -71,6 +71,11 @@ def start_controller(
         runtime_value["benefit_signatures"] = signature_value.get(
             "signatures", signature_value
         )
+    if controller.dynamic_model_file:
+        model_path = Path(controller.dynamic_model_file)
+        runtime_value["dynamic_model"] = json.loads(
+            model_path.read_text(encoding="utf-8")
+        )
     write_json(runtime, runtime_value)
     host.run(f"mkdir -p {shlex.quote(remote)}")
     remote_config = f"{remote}/runtime-config.json"
@@ -105,12 +110,14 @@ def mark_controller(
     session: str,
     phase: str,
     active: bool,
+    relationship_candidates: str = "",
 ) -> dict[str, Any]:
     remote = remote_controller_dir(config, session)
     flag = "--active" if active else "--inactive"
     result = Host(str(config.target["host"])).run(
         f"{_agent(controller)} mark --run-dir {shlex.quote(remote)} "
-        f"--phase {shlex.quote(phase)} {flag}",
+        f"--phase {shlex.quote(phase)} {flag} "
+        f"--relationship-candidates {shlex.quote(relationship_candidates)}",
         check=False,
     )
     if result.returncode:
