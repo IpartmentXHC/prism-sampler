@@ -2,6 +2,10 @@
 required = ["prism"]
 optional = ["phase-marker"]
 
+[profiles.placement-validation]
+required = []
+optional = ["phase-marker"]
+
 [profiles.relationship]
 required = ["prism", "snapshot"]
 optional = ["phase-marker"]

@@ -248,12 +248,12 @@ def execute_stage_c(
     render_controller_config(
         selected, local, target_host="kunpen183",
         output_root="/data/threadState/experiments", mode="off",
-        initial_state="two_node", sampling_profile="minimal",
+        initial_state="two_node", sampling_profile="placement-validation",
     )
     render_controller_config(
         selected, remote, target_host="192.168.70.183",
         output_root="/home/xhc/.local/share/prism-sampler/experiments", mode="off",
-        initial_state="two_node", sampling_profile="minimal",
+        initial_state="two_node", sampling_profile="placement-validation",
     )
     Host("ubuntu197").copy_to(remote, "/home/xhc/.config/prism-sampler/local.toml")
     run_roots = {}
@@ -261,7 +261,7 @@ def execute_stage_c(
         scenario = render_place_scenario(load, generated / f"scenario-{load}.env")
         suite = generated / f"suite-{load}.env"
         render_place_suite(load, candidates[load], scenario, suite, seed=seed + index)
-        experiment_root = root / f"stage-c-v3-{load}"
+        experiment_root = root / f"stage-c-v4-{load}"
         code = run_yba_suite(
             load_config(local), base, suite, experiment_root=experiment_root,
             resume=(experiment_root / "yba-suite").exists(),
