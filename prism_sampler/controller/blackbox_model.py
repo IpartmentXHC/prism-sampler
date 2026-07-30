@@ -54,6 +54,17 @@ FEATURES = (
     "r_self_score_sum",
 )
 
+# Capacity scaling and relationship placement are separate decisions.  The
+# current dataset has four independent pressure levels, which cannot identify
+# separate coefficients for the correlated PMU, NUMA, and relationship
+# signals.  Keep those signals as context and G_place evidence until targeted
+# perturbations make their causal contribution identifiable.
+G_SCALE_FEATURES = (
+    "run_pressure",
+    "rq_pressure",
+    "allowed_node_utilization",
+)
+
 
 class BlackboxGainEstimate:
     def __init__(self, expected_gain_pct, model_distance, confidence, feature_coverage, contributions):
@@ -573,7 +584,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def train_blackbox_model(
-    experiments: list[Path], output: Path, *, alpha: float = 10.0
+    experiments: list[Path], output: Path, *, alpha: float = 1.0
 ) -> dict[str, Any]:
     for name in FEATURES:
         lowered = name.lower()
@@ -601,7 +612,12 @@ def train_blackbox_model(
             ]
             if not training:
                 continue
-            model = _fit_ridge(training, _usable_features(training), alpha)
+            usable = set(_usable_features(training))
+            model = _fit_ridge(
+                training,
+                tuple(name for name in G_SCALE_FEATURES if name in usable),
+                alpha,
+            )
             for row in testing:
                 predicted, contributions = _predict(model, row)
                 predictions.append({
@@ -631,7 +647,12 @@ def train_blackbox_model(
         selected = [row for row in valid if row["direction"] == direction]
         if not selected:
             continue
-        model = _fit_ridge(selected, _usable_features(selected), alpha)
+        usable = set(_usable_features(selected))
+        model = _fit_ridge(
+            selected,
+            tuple(name for name in G_SCALE_FEATURES if name in usable),
+            alpha,
+        )
         models[direction] = _serializable_model(model)
         gains = [float(row["label_gain_pct"]) for row in selected]
         direction_diversity[direction] = {
@@ -641,13 +662,16 @@ def train_blackbox_model(
         }
         for row in selected:
             predicted, values = _predict(model, row)
-            for feature, contribution in values.items():
+            for feature in FEATURES:
                 contributions.append({
                     "experiment": row["experiment"],
                     "direction": direction,
                     "feature": feature,
                     "feature_value": row.get(feature),
-                    "contribution_pct_points": contribution,
+                    "model_role": (
+                        "g_scale_decision" if feature in values else "context_or_g_place"
+                    ),
+                    "contribution_pct_points": values.get(feature),
                     "predicted_gain_pct": predicted,
                 })
     _write_csv(output / "blackbox-action-contributions.csv", contributions)
@@ -692,9 +716,11 @@ def train_blackbox_model(
             "passed": coverage >= 0.90 and accuracy >= 0.80 and identifiable,
         },
         "model": {
-            "type": "separate-direction robust-scaled ridge",
+            "type": "separate-direction robust-scaled ridge with layered features",
             "alpha": alpha,
             "minimum_training_feature_coverage": 0.5,
+            "decision_features": list(G_SCALE_FEATURES),
+            "context_or_g_place_features": sorted(set(FEATURES) - set(G_SCALE_FEATURES)),
             "excluded_features": sorted(
                 set(FEATURES)
                 - set().union(*(

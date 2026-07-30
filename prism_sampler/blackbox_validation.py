@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import statistics
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,6 +17,7 @@ from .remote import Host
 
 
 SCHEMA = "prism-sampler.blackbox-stage-d.v1"
+MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION = 0.10
 FORBIDDEN_TOKENS = (
     "throughput", "latency", "p99", "workload", "profile", "client",
     "offered", "thread", "query",
@@ -155,6 +157,17 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
         if row.get("action") in {"expand", "shrink"}
         and row.get("reason") != "pressure_safety_expand"
     ]
+    unused_node_utilization = [
+        float(value)
+        for row in active_samples
+        if (value := (row.get("system_features") or {}).get("unused_node_utilization"))
+        is not None
+    ]
+    isolated_environment = bool(
+        unused_node_utilization
+        and statistics.median(unused_node_utilization)
+        <= MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
+    )
     online_kpi_rows = sum(bool(row.get("kpi")) for row in samples)
     online_database_rows = sum(bool(row.get("clickhouse_metrics")) for row in samples)
     forbidden_feature_keys = sorted({
@@ -169,15 +182,27 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
         "valid_system_windows": len(active_samples),
         "model_decision_windows": len(model_windows),
         "recommendations": len(recommendations),
+        "model_recommendations": len(model_recommendations),
         "directions": sorted({str(row.get("action")) for row in recommendations}),
         "minimum_recommendation_confidence": min(
             (float(row.get("model_confidence") or 0) for row in model_recommendations),
-            default=1.0,
+            default=None,
         ),
         "minimum_recommendation_feature_coverage": min(
             (float(row.get("feature_coverage") or 0) for row in model_recommendations),
-            default=1.0,
+            default=None,
         ),
+        "calibration_environment": {
+            "unused_node_windows": len(unused_node_utilization),
+            "median_unused_node_utilization": (
+                statistics.median(unused_node_utilization)
+                if unused_node_utilization else None
+            ),
+            "maximum_median_unused_node_utilization": (
+                MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
+            ),
+            "isolated": isolated_environment,
+        },
         "confirmation_failures": confirmation_failures,
         "repeated_within_minute": repeated_within_minute,
         "capacity_infeasible_windows": sum(
@@ -195,9 +220,13 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
     report["passed"] = bool(
         report["valid_system_windows"] >= 30
         and report["model_decision_windows"] >= 30
+        and report["model_recommendations"] >= 2
         and set(report["directions"]) == {"expand", "shrink"}
+        and report["minimum_recommendation_confidence"] is not None
         and report["minimum_recommendation_confidence"] >= 0.8
+        and report["minimum_recommendation_feature_coverage"] is not None
         and report["minimum_recommendation_feature_coverage"] >= 0.8
+        and isolated_environment
         and report["confirmation_failures"] == 0
         and report["repeated_within_minute"] == 0
         and report["unsafe_capacity_recommendations"] == 0

@@ -180,7 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     pressure_blackbox = pressure_sub.add_parser("train-blackbox-g")
     pressure_blackbox.add_argument("experiment", nargs="+", type=Path)
     pressure_blackbox.add_argument("--output", required=True, type=Path)
-    pressure_blackbox.add_argument("--alpha", type=float, default=10.0)
+    pressure_blackbox.add_argument("--alpha", type=float, default=1.0)
     pressure_stage_b = pressure_sub.add_parser("execute-blackbox-stage-b")
     pressure_stage_b.add_argument("--root", required=True, type=Path)
     pressure_stage_b.add_argument("--selected", required=True, type=Path)

@@ -27,7 +27,11 @@ def _shadow_experiment(root, name: str, action: str):
             "valid": True,
             "kpi": {},
             "clickhouse_metrics": {},
-            "system_features": {"run_pressure": 0.5, "r_pair_score_max": 10},
+            "system_features": {
+                "run_pressure": 0.5,
+                "r_pair_score_max": 10,
+                "unused_node_utilization": 0.01,
+            },
         })
         decisions.append({
             "realtime_ns": stamp,
@@ -93,6 +97,39 @@ def test_shadow_gate_rejects_low_confidence_recommendation(tmp_path):
 
     assert not report["passed"]
     assert report["minimum_recommendation_confidence"] == 0.79
+
+
+def test_shadow_gate_reports_missing_model_recommendations(tmp_path):
+    experiment = _shadow_experiment(tmp_path, "one", "expand")
+    decisions = _read_jsonl(experiment / "controller" / "decisions.jsonl")
+    for row in decisions:
+        row["action"] = None
+    _write_jsonl(experiment / "controller" / "decisions.jsonl", decisions)
+    _write_jsonl(experiment / "controller" / "actions.jsonl", [])
+
+    report = validate_shadow([experiment], tmp_path / "report.json")
+
+    assert not report["passed"]
+    assert report["model_recommendations"] == 0
+    assert report["minimum_recommendation_confidence"] is None
+    assert report["minimum_recommendation_feature_coverage"] is None
+
+
+def test_shadow_gate_rejects_contaminated_calibration_host(tmp_path):
+    experiments = [
+        _shadow_experiment(tmp_path, "one", "expand"),
+        _shadow_experiment(tmp_path, "two", "shrink"),
+    ]
+    path = experiments[0] / "controller" / "samples.jsonl"
+    rows = _read_jsonl(path)
+    for row in rows:
+        row["system_features"]["unused_node_utilization"] = 0.25
+    _write_jsonl(path, rows)
+
+    report = validate_shadow(experiments, tmp_path / "report.json")
+
+    assert not report["passed"]
+    assert not report["calibration_environment"]["isolated"]
 
 
 def test_shadow_gate_rejects_missing_three_window_confirmation(tmp_path):

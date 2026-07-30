@@ -9,6 +9,7 @@ from prism_sampler.controller.blackbox_model import (
     BlackboxGScaleModel,
     FEATURES,
     FORBIDDEN_FEATURE_TOKENS,
+    G_SCALE_FEATURES,
     LiveSystemFeatureSource,
     SCHEMA,
     extract_action_dataset,
@@ -117,6 +118,18 @@ def test_blackbox_gate_rejects_single_direction_labels(tmp_path):
     assert not report["validation"]["label_direction_identifiable"]
     assert not report["validation"]["passed"]
     assert (tmp_path / "output" / "blackbox-action-contributions.csv").is_file()
+
+
+def test_g_scale_keeps_relationship_scores_out_of_capacity_regression(tmp_path):
+    experiments = [
+        _experiment(tmp_path, f"e{index}", f"load-{index}", gain)
+        for index, gain in enumerate((-5, 0, 5, 10))
+    ]
+    report = train_blackbox_model(experiments, tmp_path / "output")
+
+    assert report["model"]["decision_features"] == list(G_SCALE_FEATURES)
+    for model in report["model"]["directions"].values():
+        assert not any(name.startswith("r_") for name in model["feature_names"])
 
 
 def _online_model(gain: float = 5.0) -> BlackboxGScaleModel:
