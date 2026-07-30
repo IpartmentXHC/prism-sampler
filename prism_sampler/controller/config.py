@@ -24,6 +24,10 @@ class ControllerConfig:
     clickhouse_client_command: str = ""
     benefit_signatures_file: str = ""
     dynamic_model_file: str = ""
+    use_kpi_online: bool = True
+    use_workload_activity_marker: bool = True
+    minimum_model_confidence: float = 0.8
+    minimum_feature_coverage: float = 0.8
     minimum_expected_gain_pct: float = 2.0
     maximum_signature_distance: float = 0.75
     maximum_model_distance: float = 2.5
@@ -97,6 +101,8 @@ class ControllerConfig:
             "minimum_two_node_dwell_seconds",
             "cooldown_seconds",
             "minimum_expected_gain_pct",
+            "minimum_model_confidence",
+            "minimum_feature_coverage",
             "maximum_signature_distance",
             "maximum_model_distance",
             "gain_uncertainty_multiplier",
@@ -111,6 +117,9 @@ class ControllerConfig:
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"controller.{name} cannot be negative")
+        for name in ("minimum_model_confidence", "minimum_feature_coverage"):
+            if getattr(self, name) > 1:
+                raise ValueError(f"controller.{name} cannot exceed 1")
         for name in ("one_node_slots", "two_node_slots", "fixed_max_threads"):
             if getattr(self, name) < 0:
                 raise ValueError(f"controller.{name} cannot be negative")

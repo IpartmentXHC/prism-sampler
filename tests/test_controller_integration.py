@@ -68,3 +68,6 @@ def test_mark_is_nonfatal_when_controller_is_absent() -> None:
                 active=True,
             )
         assert result["status"] == "not_running"
+        command = host.run.call_args.args[0]
+        assert "--relationship-candidates ''" in command
+        assert "--telemetry-dir ''" in command

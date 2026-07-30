@@ -1088,9 +1088,15 @@ SUITE_PROFILE_two_node_CLICKHOUSE_CONCURRENT_RATIO=0
 
 
 def prepare_crossover_scenario(load: str, output: Path) -> dict[str, Any]:
-    if load not in LOAD_THREADS:
+    profiles = {
+        "C1T1": (1, 1),
+        "C2T2": (2, 2),
+        "C4T6": (4, 6),
+        "C5T16": (5, 16),
+    }
+    if load not in profiles:
         raise ValueError(f"unknown crossover load: {load}")
-    clients, threads = {"C2T2": (2, 2), "C4T6": (4, 6), "C5T16": (5, 16)}[load]
+    clients, threads = profiles[load]
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         f"""SCENARIO_NAME=clickhouse_v2_crossover_{load}
@@ -1122,6 +1128,7 @@ def render_controller_config(
     dynamic_model_path: Path | None = None,
     minimum_expected_gain_pct: float = 2.0,
     controller_poll_seconds: float = 10.0,
+    use_kpi_online: bool = True,
 ) -> dict[str, Any]:
     selected = json.loads(selected_path.read_text(encoding="utf-8"))
     transitions = scripted_transitions or []
@@ -1160,7 +1167,7 @@ window_seconds = 60
 stability_window_seconds = 10
 emit_seconds = 10
 minimum_evidence_windows = 3
-record_snapshots = true
+record_snapshots = false
 [controller]
 mode = {json.dumps(mode)}
 sample_interval_seconds = {controller_poll_seconds}
@@ -1177,7 +1184,11 @@ clickhouse_preprocessed_config_path = "/home/xhc/clickhouse/data/preprocessed_co
 clickhouse_client_command = "/home/xhc/clickhouse/ClickHouse/build/programs/clickhouse-client --host 127.0.0.1 --port 9000"
 benefit_signatures_file = {json.dumps(str(selected_path.resolve()))}
 dynamic_model_file = {json.dumps(str(dynamic_model_path.resolve()) if dynamic_model_path else "")}
+use_kpi_online = {str(use_kpi_online).lower()}
+use_workload_activity_marker = {str(use_kpi_online).lower()}
 minimum_expected_gain_pct = {minimum_expected_gain_pct}
+minimum_model_confidence = 0.8
+minimum_feature_coverage = 0.8
 maximum_signature_distance = 0.75
 maximum_model_distance = 2.5
 gain_uncertainty_multiplier = 0.5
@@ -1192,7 +1203,7 @@ rollback_p99_increase_pct = 50
 fine_placement_mode = "shadow"
 fine_placement_pair_threshold = 10
 fine_placement_self_threshold = 10
-fine_placement_minimum_confidence = 0.7
+fine_placement_minimum_confidence = 0.8
 fine_placement_cluster_size = 4
 actuator = "taskset"
 migrate_pages = false

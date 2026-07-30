@@ -11,12 +11,14 @@ from typing import Any
 
 from .actuator import ClickHouseSlotsActuator, TasksetActuator
 from .config import ControllerConfig
+from .blackbox_model import BlackboxGScaleModel, LiveSystemFeatureSource, SCHEMA as BLACKBOX_SCHEMA
 from .dynamic_model import GScaleModel
 from .fine_placement import FinePlacementShadow
 from .journal import append_jsonl, read_json, write_json
 from .metrics import ProcMetricSource, cpu_nodes, format_cpu_list, process_start_time
 from .policy import (
     BenefitPolicy,
+    BlackboxBenefitPolicy,
     ContinuousBenefitPolicy,
     Decision,
     PressurePolicy,
@@ -65,7 +67,20 @@ class ControllerRuntime:
         self.one_capacity = len(set(int(cpu) for cpu in _expand(self.one_cpus)))
         signatures = list(raw.get("benefit_signatures", []))
         dynamic_model = raw.get("dynamic_model")
-        if dynamic_model:
+        if dynamic_model and dynamic_model.get("schema") == BLACKBOX_SCHEMA:
+            if self.config.use_kpi_online:
+                raise ValueError(
+                    "blackbox-g-scale requires controller.use_kpi_online=false"
+                )
+            if self.config.use_workload_activity_marker:
+                raise ValueError(
+                    "blackbox-g-scale requires "
+                    "controller.use_workload_activity_marker=false"
+                )
+            self.policy = BlackboxBenefitPolicy(
+                self.config, BlackboxGScaleModel(dict(dynamic_model))
+            )
+        elif dynamic_model:
             self.policy = ContinuousBenefitPolicy(
                 self.config, GScaleModel(dict(dynamic_model))
             )
@@ -74,6 +89,7 @@ class ControllerRuntime:
         else:
             self.policy = PressurePolicy(self.config)
         self.source = ProcMetricSource(self.pids, self.start_times)
+        self.system_features = LiveSystemFeatureSource()
         self.actuator = TasksetActuator(
             self.pids, self.start_times, command_prefix=self.command_prefix
         )
@@ -323,8 +339,13 @@ class ControllerRuntime:
                 "policy": type(self.policy).__name__,
                 "dynamic_model_schema": (
                     self.policy.model.raw.get("schema")
-                    if isinstance(self.policy, ContinuousBenefitPolicy)
+                    if isinstance(
+                        self.policy, (ContinuousBenefitPolicy, BlackboxBenefitPolicy)
+                    )
                     else None
+                ),
+                "online_input_mode": (
+                    "application_kpi" if self.config.use_kpi_online else "system_blackbox"
                 ),
             },
         )
@@ -339,13 +360,32 @@ class ControllerRuntime:
                 )
                 self.current_phase = str(control.get("phase", ""))
                 sample = self.source.sample(
-                    workload_active=bool(control.get("workload_active")),
+                    workload_active=(
+                        bool(control.get("workload_active"))
+                        if self.config.use_workload_activity_marker else True
+                    ),
                     capacity_cpus=self.one_capacity,
                 )
-                latest_kpi = read_json(self.run_dir / "kpi-latest.json")
-                if latest_kpi.get("phase") == str(control.get("phase", "")):
-                    sample.kpi.update(latest_kpi)
-                if self.slots:
+                if isinstance(self.policy, BlackboxBenefitPolicy):
+                    sample.system_features.update(
+                        self.system_features.build(
+                            sample,
+                            state=self.actual_state.value,
+                            telemetry_dir=(
+                                Path(str(control["telemetry_dir"]))
+                                if control.get("telemetry_dir") else None
+                            ),
+                            relationship_candidates=(
+                                Path(str(control["relationship_candidates"]))
+                                if control.get("relationship_candidates") else None
+                            ),
+                        )
+                    )
+                if self.config.use_kpi_online:
+                    latest_kpi = read_json(self.run_dir / "kpi-latest.json")
+                    if latest_kpi.get("phase") == str(control.get("phase", "")):
+                        sample.kpi.update(latest_kpi)
+                if self.slots and self.config.use_kpi_online:
                     try:
                         sample.clickhouse_metrics.update(self.slots.metrics())
                         sample.clickhouse_metrics["configured_slots"] = float(
@@ -353,7 +393,8 @@ class ControllerRuntime:
                         )
                     except (RuntimeError, ValueError) as exc:
                         sample.clickhouse_metrics["query_error"] = str(exc)
-                self._record_kpi(sample.kpi, sample.monotonic_ns)
+                if self.config.use_kpi_online:
+                    self._record_kpi(sample.kpi, sample.monotonic_ns)
                 sample_row = {
                     "schema": "prism-sampler.controller-sample.v1",
                     **sample.to_dict(),
@@ -387,7 +428,10 @@ class ControllerRuntime:
                         append_jsonl(
                             self.run_dir / "fine-placement.jsonl", placement
                         )
-                rolled_back = self._validate_pending_action(sample.monotonic_ns)
+                rolled_back = (
+                    self._validate_pending_action(sample.monotonic_ns)
+                    if self.config.use_kpi_online else False
+                )
                 decision = self._scripted_decision(
                     sample, str(control.get("phase", ""))
                 ) or self.policy.evaluate(sample)
@@ -407,7 +451,7 @@ class ControllerRuntime:
                 if decision.action and not rolled_back:
                     target = ScalingState(decision.target_state)
                     previous = self.actual_state
-                    baseline = self._kpi_baseline()
+                    baseline = self._kpi_baseline() if self.config.use_kpi_online else {}
                     result = self._action(decision.action, target)
                     if self.config.mode == "shadow":
                         self.policy.force_state(self.actual_state, sample.monotonic_ns)
@@ -415,6 +459,7 @@ class ControllerRuntime:
                         self.config.mode == "active"
                         and result.get("status") == "applied"
                         and not self.scripted
+                        and self.config.use_kpi_online
                     ):
                         self._start_action_validation(
                             previous, time.monotonic_ns(), baseline

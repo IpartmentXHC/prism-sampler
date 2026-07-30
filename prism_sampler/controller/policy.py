@@ -8,6 +8,7 @@ from typing import Any
 
 from .config import ControllerConfig
 from .dynamic_model import GScaleModel
+from .blackbox_model import BlackboxGScaleModel
 from .models import MetricSample
 
 
@@ -37,6 +38,8 @@ class Decision:
     model_confidence: float | None = None
     nearest_anchor: str | None = None
     pressure_baseline: float | None = None
+    feature_coverage: float | None = None
+    model_contributions: dict[str, float] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -520,4 +523,104 @@ class ContinuousBenefitPolicy(PressurePolicy):
             action=action,
             current=current,
             estimate=estimate,
+        )
+
+
+class BlackboxBenefitPolicy(PressurePolicy):
+    """System-telemetry-only policy; application KPI is never an input."""
+
+    def __init__(self, config: ControllerConfig, model: BlackboxGScaleModel):
+        super().__init__(config)
+        self.model = model
+        self.matches = 0
+        self.last_recommendation: ScalingState | None = None
+
+    def force_state(self, state: ScalingState, timestamp_ns: int | None = None) -> None:
+        super().force_state(state, timestamp_ns)
+        if hasattr(self, "matches"):
+            self.matches = 0
+
+    def _decision(
+        self,
+        sample: MetricSample,
+        reason: str,
+        estimate: Any = None,
+        action: str | None = None,
+        current: ScalingState | None = None,
+    ) -> Decision:
+        return Decision(
+            realtime_ns=sample.realtime_ns,
+            current_state=(current or self.state).value,
+            target_state=self.state.value,
+            action=action,
+            reason=reason,
+            expand_matches=self.matches,
+            shrink_elapsed_seconds=0.0,
+            decision_source="blackbox_system_g_scale",
+            expected_gain_pct=estimate.expected_gain_pct if estimate else None,
+            model_distance=estimate.model_distance if estimate else None,
+            model_confidence=estimate.confidence if estimate else None,
+            feature_coverage=estimate.feature_coverage if estimate else None,
+            model_contributions=estimate.contributions if estimate else None,
+        )
+
+    def evaluate(self, sample: MetricSample) -> Decision:
+        if not sample.workload_active:
+            self.matches = 0
+            self.last_recommendation = None
+            return self._decision(sample, "workload_inactive")
+        if not sample.valid:
+            self.matches = 0
+            return self._decision(sample, "invalid_sample")
+        direction = "expand" if self.state == ScalingState.ONE_NODE else "shrink"
+        estimate = self.model.estimate(direction, sample.system_features)
+        high_pressure = bool(
+            self.state == ScalingState.ONE_NODE
+            and sample.run_pressure is not None
+            and sample.rq_pressure is not None
+            and sample.run_pressure >= self.config.expand_run_pressure
+            and sample.rq_pressure >= self.config.expand_rq_pressure
+        )
+        if (
+            not high_pressure
+            and (
+                estimate.feature_coverage < self.config.minimum_feature_coverage
+                or estimate.confidence < self.config.minimum_model_confidence
+            )
+        ):
+            self.matches = 0
+            return self._decision(sample, "insufficient_system_evidence", estimate)
+        beneficial = estimate.expected_gain_pct >= self.config.minimum_expected_gain_pct
+        if not beneficial and not high_pressure:
+            self.matches = 0
+            self.last_recommendation = None
+            return self._decision(sample, "predicted_gain_below_gate", estimate)
+        target = (
+            ScalingState.TWO_NODE
+            if self.state == ScalingState.ONE_NODE else ScalingState.ONE_NODE
+        )
+        self.matches += 1
+        if self.matches < self.config.decision_window_samples:
+            return self._decision(sample, "system_gain_confirming", estimate)
+        dwell = self._elapsed(sample.monotonic_ns, self.last_transition_ns)
+        if self.last_transition_ns is not None and dwell < self.config.cooldown_seconds:
+            return self._decision(sample, "cooldown", estimate)
+        if self.state == ScalingState.TWO_NODE and dwell < self.config.minimum_two_node_dwell_seconds:
+            return self._decision(sample, "minimum_two_node_dwell", estimate)
+        if self.config.mode == "shadow" and self.last_recommendation == target:
+            self.matches = 0
+            return self._decision(sample, "shadow_recommendation_stable", estimate)
+        current = self.state
+        self.state = target
+        action = "expand" if target == ScalingState.TWO_NODE else "shrink"
+        self.last_action = action
+        self.last_transition_ns = sample.monotonic_ns
+        self.last_recommendation = target
+        self.matches = 0
+        return self._decision(
+            sample,
+            "pressure_safety_expand" if high_pressure else "blackbox_predicted_gain",
+            estimate,
+            action,
+            current,
         )

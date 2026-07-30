@@ -75,6 +75,9 @@ def _import_tables(
         "clickhouse_metrics_json": json.dumps(
             row.get("clickhouse_metrics", {}), sort_keys=True
         ),
+        "system_features_json": json.dumps(
+            row.get("system_features", {}), sort_keys=True
+        ),
         "error": row.get("error"),
     } for row in samples]
     decision_rows = [{
@@ -98,6 +101,10 @@ def _import_tables(
         "model_confidence": row.get("model_confidence"),
         "nearest_anchor": row.get("nearest_anchor"),
         "pressure_baseline": row.get("pressure_baseline"),
+        "feature_coverage": row.get("feature_coverage"),
+        "model_contributions_json": json.dumps(
+            row.get("model_contributions", {}), sort_keys=True
+        ),
     } for row in decisions]
     action_rows = [{
         "realtime_ns": int(row.get("realtime_ns") or row.get("started_realtime_ns") or 0),
@@ -122,7 +129,7 @@ def _import_tables(
             "kpi_error_delta BIGINT, kpi_timeout_delta BIGINT, query_threads DOUBLE, "
             "global_threads_active DOUBLE, global_threads_scheduled DOUBLE, "
             "configured_slots DOUBLE, kpi_json VARCHAR, clickhouse_metrics_json VARCHAR, "
-            "error VARCHAR"
+            "system_features_json VARCHAR, error VARCHAR"
         ),
         "controller_decisions": (
             "realtime_ns BIGINT, phase VARCHAR, mode VARCHAR, current_state VARCHAR, "
@@ -131,6 +138,7 @@ def _import_tables(
             "signature_threads INTEGER, signature_distance DOUBLE, pressure_ref DOUBLE, "
             "gain_stddev_pct DOUBLE, gain_lower_bound_pct DOUBLE, model_distance DOUBLE, "
             "model_confidence DOUBLE, nearest_anchor VARCHAR, pressure_baseline DOUBLE"
+            ", feature_coverage DOUBLE, model_contributions_json VARCHAR"
         ),
         "controller_actions": (
             "realtime_ns BIGINT, phase VARCHAR, mode VARCHAR, action VARCHAR, from_state VARCHAR, "

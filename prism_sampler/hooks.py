@@ -196,12 +196,17 @@ def handle(
                 f"{collector.remote_dir}/live-candidates-latest.json"
                 if controller.fine_placement_mode == "shadow" else ""
             ),
+            telemetry_dir=str(collector.remote_dir),
         )
-        forwarding = start_kpi_forwarder(
-            config,
-            controller,
-            session=session,
-            yba_run_dir=Path(str(context["run_dir"])),
+        forwarding = (
+            start_kpi_forwarder(
+                config,
+                controller,
+                session=session,
+                yba_run_dir=Path(str(context["run_dir"])),
+            )
+            if controller.use_kpi_online
+            else {"status": "disabled", "reason": "system_blackbox_mode"}
         )
         return {
             "event": event,
@@ -215,7 +220,11 @@ def handle(
         scaling = mark_controller(
             config, controller, session=session, phase=phase, active=False
         )
-        forwarding = stop_kpi_forwarder(Path(str(context["run_dir"])))
+        forwarding = (
+            stop_kpi_forwarder(Path(str(context["run_dir"])))
+            if controller.use_kpi_online
+            else {"status": "disabled", "reason": "system_blackbox_mode"}
+        )
         state_path = _state_path(config, session, phase, round_number)
         if not state_path.is_file():
             raise RuntimeError(f"collection state is missing: {state_path}")

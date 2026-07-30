@@ -8,8 +8,11 @@ from pathlib import Path
 from .collectors import CollectionSession, SessionContext
 from .artifacts import finalize_run
 from .calibration import calibrate_experiment
+from .blackbox_runner import execute_stage_b
+from .blackbox_validation import execute_stage_d
 from .config import load_config, read_toml
 from .controller.commands import controller_preflight, replay_experiment
+from .controller.blackbox_model import train_blackbox_model
 from .controller.dynamic_model import (
     build_dynamic_model,
     replay_pressure_windows,
@@ -20,6 +23,7 @@ from .deploy import build_bundle, install_bundle, install_client, smoke_bundle
 from .hooks import handle
 from .orchestration import preflight, run_yba, run_yba_suite
 from .platform import probe, write_report
+from .place_calibration import execute_stage_c
 from .pressure_v2 import (
     analyze_calibration,
     analyze_combined_calibration,
@@ -131,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     pressure_static.add_argument("selected", type=Path)
     pressure_static.add_argument("--output", required=True, type=Path)
     pressure_crossover = pressure_sub.add_parser("prepare-crossover")
-    pressure_crossover.add_argument("load", choices=["C2T2", "C4T6", "C5T16"])
+    pressure_crossover.add_argument("load", choices=["C1T1", "C2T2", "C4T6", "C5T16"])
     pressure_crossover.add_argument("--output", required=True, type=Path)
     pressure_runtime = pressure_sub.add_parser("render-controller-config")
     pressure_runtime.add_argument("selected", type=Path)
@@ -173,6 +177,31 @@ def build_parser() -> argparse.ArgumentParser:
     pressure_active.add_argument("--output", required=True, type=Path)
     pressure_active.add_argument("--equivalent-gain-pct", type=float, default=2.0)
     pressure_active.add_argument("--settling-seconds", type=float, default=20.0)
+    pressure_blackbox = pressure_sub.add_parser("train-blackbox-g")
+    pressure_blackbox.add_argument("experiment", nargs="+", type=Path)
+    pressure_blackbox.add_argument("--output", required=True, type=Path)
+    pressure_blackbox.add_argument("--alpha", type=float, default=10.0)
+    pressure_stage_b = pressure_sub.add_parser("execute-blackbox-stage-b")
+    pressure_stage_b.add_argument("--root", required=True, type=Path)
+    pressure_stage_b.add_argument("--selected", required=True, type=Path)
+    pressure_stage_b.add_argument("--base-config", required=True, type=Path)
+    pressure_stage_b.add_argument("--seed", type=int, default=20260730)
+    pressure_stage_c = pressure_sub.add_parser("execute-g-place-stage-c")
+    pressure_stage_c.add_argument("--root", required=True, type=Path)
+    pressure_stage_c.add_argument("--stage-b-state", required=True, type=Path)
+    pressure_stage_c.add_argument("--selected", required=True, type=Path)
+    pressure_stage_c.add_argument("--base-config", required=True, type=Path)
+    pressure_stage_c.add_argument("--seed", type=int, default=20260730)
+    pressure_stage_d = pressure_sub.add_parser("execute-blackbox-stage-d")
+    pressure_stage_d.add_argument("--root", required=True, type=Path)
+    pressure_stage_d.add_argument("--selected", required=True, type=Path)
+    pressure_stage_d.add_argument("--model", required=True, type=Path)
+    pressure_stage_d.add_argument("--stage-c-validation", required=True, type=Path)
+    pressure_stage_d.add_argument("--base-config", required=True, type=Path)
+    pressure_stage_d.add_argument("--scenario", required=True, type=Path)
+    pressure_stage_d.add_argument("--manifest", required=True, type=Path)
+    pressure_stage_d.add_argument("--anchors", required=True, type=Path)
+    pressure_stage_d.add_argument("--skip-deploy", action="store_true")
 
     policy = commands.add_parser("policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
@@ -360,6 +389,25 @@ def main() -> None:
             args.output,
             equivalent_gain_pct=args.equivalent_gain_pct,
             settling_seconds=args.settling_seconds,
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "train-blackbox-g":
+        print(json.dumps(train_blackbox_model(
+            args.experiment, args.output, alpha=args.alpha
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "execute-blackbox-stage-b":
+        print(json.dumps(execute_stage_b(
+            args.root, args.selected, args.base_config, seed=args.seed
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "execute-g-place-stage-c":
+        print(json.dumps(execute_stage_c(
+            args.root, args.stage_b_state, args.selected, args.base_config,
+            seed=args.seed,
+        ), indent=2, sort_keys=True))
+    elif args.command == "pressure-v2" and args.pressure_command == "execute-blackbox-stage-d":
+        print(json.dumps(execute_stage_d(
+            args.root, args.selected, args.model, args.stage_c_validation,
+            args.base_config, args.scenario, args.manifest, args.anchors,
+            deploy=not args.skip_deploy,
         ), indent=2, sort_keys=True))
     elif args.command == "pressure-v2":
         print(json.dumps(

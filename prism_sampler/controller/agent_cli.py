@@ -28,6 +28,7 @@ def mark(
     active: bool,
     phase: str,
     relationship_candidates: str = "",
+    telemetry_dir: str = "",
 ) -> dict[str, object]:
     pid_record = read_json(run_dir / "controller.pid.json")
     if not pid_record or not _current(
@@ -40,6 +41,7 @@ def mark(
         "realtime_ns": time.time_ns(),
         "monotonic_ns": time.monotonic_ns(),
         "relationship_candidates": relationship_candidates,
+        "telemetry_dir": telemetry_dir,
     }
     write_json(run_dir / "control.json", value)
     return {"status": "marked", **value}
@@ -70,6 +72,7 @@ def main() -> None:
     marker.add_argument("--run-dir", required=True, type=Path)
     marker.add_argument("--phase", default="")
     marker.add_argument("--relationship-candidates", default="")
+    marker.add_argument("--telemetry-dir", default="")
     activity = marker.add_mutually_exclusive_group(required=True)
     activity.add_argument("--active", action="store_true")
     activity.add_argument("--inactive", action="store_true")
@@ -93,6 +96,7 @@ def main() -> None:
             active=args.active,
             phase=args.phase,
             relationship_candidates=args.relationship_candidates,
+            telemetry_dir=args.telemetry_dir,
         )
     elif args.command == "stop":
         result = stop(args.run_dir, args.timeout)

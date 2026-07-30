@@ -4,8 +4,8 @@
 
 ```text
 YBA                 prism-sampler                     controller prototype
-service/workload -> phase hook -> collectors -> R     pressure -> affinity
-KPI/timeline         raw + telemetry DB3              journal + rollback
+service/workload -> phase hook -> collectors -> R     system G -> affinity
+offline KPI labels   raw + telemetry DB3              journal + safety rollback
 ```
 
 YBA remains authoritative for service readiness and workload timing. Its
@@ -19,7 +19,9 @@ copy the analysis UI or modify upstream ownership boundaries.
 
 The pressure controller is a separate target-local process. YBA hooks only
 start, mark, stop, and collect it. The collector never changes affinity, and
-the controller never reads workload labels to make decisions.
+the pure black-box controller never reads workload identity, phase activity,
+throughput, P99, or errors to make decisions. Those application KPIs are
+imported after a run for supervision and acceptance only.
 
 ## Collection Lifecycle
 

@@ -73,4 +73,5 @@ health and candidates without invoking `taskset`.
 See [Architecture](docs/architecture.md), [Data Contract](docs/data-contract.md),
 [Policy Schema](docs/policy-schema.md), and
 [Pressure Controller](docs/pressure-aware-numa-scaling.md).
-See also [Live Relationship Analysis](docs/live-relationships.md).
+See also [Live Relationship Analysis](docs/live-relationships.md) and
+[Pure System Black-Box Scheduling](docs/system-blackbox-scheduling.md).

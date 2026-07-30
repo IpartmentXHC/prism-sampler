@@ -111,13 +111,15 @@ def mark_controller(
     phase: str,
     active: bool,
     relationship_candidates: str = "",
+    telemetry_dir: str = "",
 ) -> dict[str, Any]:
     remote = remote_controller_dir(config, session)
     flag = "--active" if active else "--inactive"
     result = Host(str(config.target["host"])).run(
         f"{_agent(controller)} mark --run-dir {shlex.quote(remote)} "
         f"--phase {shlex.quote(phase)} {flag} "
-        f"--relationship-candidates {shlex.quote(relationship_candidates)}",
+        f"--relationship-candidates {shlex.quote(relationship_candidates)} "
+        f"--telemetry-dir {shlex.quote(telemetry_dir)}",
         check=False,
     )
     if result.returncode:
