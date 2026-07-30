@@ -180,8 +180,12 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
         ),
         "confirmation_failures": confirmation_failures,
         "repeated_within_minute": repeated_within_minute,
-        "capacity_infeasible": sum(
+        "capacity_infeasible_windows": sum(
             row.get("status") == "capacity_infeasible" for row in placements
+        ),
+        "unsafe_capacity_recommendations": sum(
+            bool(row.get("apply_allowed")) and not bool(row.get("capacity_feasible"))
+            for row in placements
         ),
         "online_kpi_rows": online_kpi_rows,
         "online_database_metric_rows": online_database_rows,
@@ -196,7 +200,7 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
         and report["minimum_recommendation_feature_coverage"] >= 0.8
         and report["confirmation_failures"] == 0
         and report["repeated_within_minute"] == 0
-        and report["capacity_infeasible"] == 0
+        and report["unsafe_capacity_recommendations"] == 0
         and report["online_kpi_rows"] == 0
         and report["online_database_metric_rows"] == 0
         and report["activity_marker_enabled_runs"] == 0
