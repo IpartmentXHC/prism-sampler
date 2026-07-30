@@ -182,6 +182,8 @@ def install_bundle(host: Host, bundle: Path, install_dir: str) -> None:
     archive = shlex.quote(remote_archive)
     host.run(
         f"mkdir -p {install} && tar -xzf {archive} -C {install} --strip-components=1 "
+        f"&& find {install} -type d -name __pycache__ -prune -exec rm -rf {{}} + "
+        f"&& python3 -m compileall -q {install}/python/prism_sampler "
         f"&& chmod +x {install}/prismctl {install}/capability-probe "
         f"{install}/bin/metric-collector {install}/bin/prism-sampler-agent "
         f"{install}/bin/prism-numa-controller {install}/bin/prism-kpi-forwarder "
@@ -210,6 +212,9 @@ def install_client(host: Host, install_dir: str, config: Path | None = None) -> 
         host.run(
             f"mkdir -p {shlex.quote(install_dir)} && "
             f"tar -xzf {remote_archive} -C {shlex.quote(install_dir)} --strip-components=1 && "
+            f"find {shlex.quote(install_dir)} -type d -name __pycache__ -prune "
+            f"-exec rm -rf {{}} + && "
+            f"python3 -m compileall -q {shlex.quote(install_dir + '/prism_sampler')} && "
             "python3 -m pip install --user 'duckdb>=1.0' 'tomli>=2.0'"
         )
         launcher_dir = Path(temporary) / "bin"
