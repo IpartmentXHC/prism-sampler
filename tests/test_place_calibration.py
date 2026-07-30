@@ -1,6 +1,28 @@
 import json
+from unittest.mock import Mock, patch
 
-from prism_sampler.place_calibration import render_place_suite, select_r_candidates
+from prism_sampler.place_calibration import (
+    prepare_stage_c_client,
+    render_place_suite,
+    select_r_candidates,
+)
+
+
+def test_stage_c_deploys_client_before_remote_config(tmp_path):
+    remote_config = tmp_path / "remote.toml"
+    remote_config.write_text("[sampling]\n")
+    client = Mock()
+
+    with (
+        patch("prism_sampler.place_calibration.Host", return_value=client),
+        patch("prism_sampler.place_calibration.install_client") as install,
+    ):
+        prepare_stage_c_client(remote_config)
+
+    install.assert_called_once_with(client, "/home/xhc/.local/src/prism-sampler")
+    client.copy_to.assert_called_once_with(
+        remote_config, "/home/xhc/.config/prism-sampler/local.toml"
+    )
 
 
 def test_candidates_and_rules_come_from_live_r_not_hardcoded_names(tmp_path):

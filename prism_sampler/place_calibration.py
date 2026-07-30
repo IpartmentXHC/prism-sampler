@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config
+from .deploy import install_client
 from .orchestration.runner import run_yba_suite
 from .pressure_v2 import render_controller_config
 from .remote import Host
@@ -21,6 +22,12 @@ SCHEMA = "prism-sampler.g-place-calibration.v1"
 HISTORICAL_GLOB = "20260727-2*-pressure-v2-crossover-*"
 LOADS = {"C2T2": (2, 2), "C4T6": (4, 6), "C5T16": (5, 16)}
 PROFILES = ("self_compact", "self_split", "pair_colocate", "pair_separate")
+
+
+def prepare_stage_c_client(remote_config: Path) -> None:
+    client = Host("ubuntu197")
+    install_client(client, "/home/xhc/.local/src/prism-sampler")
+    client.copy_to(remote_config, "/home/xhc/.config/prism-sampler/local.toml")
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
@@ -255,7 +262,7 @@ def execute_stage_c(
         output_root="/home/xhc/.local/share/prism-sampler/experiments", mode="off",
         initial_state="two_node", sampling_profile="placement-validation",
     )
-    Host("ubuntu197").copy_to(remote, "/home/xhc/.config/prism-sampler/local.toml")
+    prepare_stage_c_client(remote)
     run_roots = {}
     for index, load in enumerate(LOADS):
         scenario = render_place_scenario(load, generated / f"scenario-{load}.env")
