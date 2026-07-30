@@ -20,7 +20,7 @@ from .remote import Host
 SCHEMA = "prism-sampler.g-place-calibration.v1"
 HISTORICAL_GLOB = "20260727-2*-pressure-v2-crossover-*"
 LOADS = {"C2T2": (2, 2), "C4T6": (4, 6), "C5T16": (5, 16)}
-PROFILES = ("two_node", "self_compact", "self_split", "pair_colocate", "pair_separate")
+PROFILES = ("self_compact", "self_split", "pair_colocate", "pair_separate")
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
@@ -123,11 +123,8 @@ SUITE_SCENARIOS='{load.lower()}={scenario}'
 SUITE_ROUNDS={rounds}
 SUITE_ORDER=randomized
 SUITE_RANDOM_SEED={seed}
-SUITE_BASELINE_PROFILE=two_node
+SUITE_BASELINE_PROFILE=self_split
 SUITE_PROFILES='{' '.join(PROFILES)}'
-SUITE_PROFILE_two_node_KIND=numa
-SUITE_PROFILE_two_node_CPU_NODES=0,1
-SUITE_PROFILE_two_node_MEMORY_NODES=
 SUITE_PROFILE_self_compact_KIND=thread_cluster
 SUITE_PROFILE_self_compact_CPU_NODES=0,1
 SUITE_PROFILE_self_compact_CPU_RULES='{_rule_name(self_group)}:{self_pattern}:0-31'
@@ -145,7 +142,7 @@ SUITE_PROFILE_pair_separate_CPU_NODES=0,1
 SUITE_PROFILE_pair_separate_CPU_RULES='a:{pair_a_pattern}:0-31 b:{pair_b_pattern}:32-63'
 SUITE_PROFILE_pair_separate_DEFAULT_CPUS=0-63
 """
-    for profile in PROFILES[1:]:
+    for profile in PROFILES:
         value += (
             f"SUITE_PROFILE_{profile}_MODE=watch\n"
             f"SUITE_PROFILE_{profile}_BIND_INTERVAL=0.2\n"
@@ -155,7 +152,7 @@ SUITE_PROFILE_pair_separate_DEFAULT_CPUS=0-63
     return {"output": str(output), "self_group": self_group, "pair": [pair_a, pair_b]}
 
 
-def render_place_scenario(load: str, output: Path, *, seconds: int = 120) -> Path:
+def render_place_scenario(load: str, output: Path, *, seconds: int = 60) -> Path:
     clients, threads = LOADS[load]
     output.write_text(f"""SCENARIO_NAME=g_place_{load.lower()}
 SCENARIO_BUDGET_MODE=duration
@@ -264,7 +261,7 @@ def execute_stage_c(
         scenario = render_place_scenario(load, generated / f"scenario-{load}.env")
         suite = generated / f"suite-{load}.env"
         render_place_suite(load, candidates[load], scenario, suite, seed=seed + index)
-        experiment_root = root / f"stage-c-{load}"
+        experiment_root = root / f"stage-c-v2-{load}"
         code = run_yba_suite(
             load_config(local), base, suite, experiment_root=experiment_root,
             resume=(experiment_root / "yba-suite").exists(),
