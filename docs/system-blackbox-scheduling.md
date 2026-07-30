@@ -61,7 +61,10 @@ project does not depend on `sched_ext`.
 ## Gates
 
 - Stage A replay: at least 90% valid feature coverage and 80% leave-one-load-out
-  direction accuracy, without application KPI features.
+  action-benefit direction accuracy, without application KPI features. The
+  decision class is `predicted gain > 2%`; negative and equivalent gains both
+  map to the controller's `hold` action while retaining their signed values for
+  explanation.
 - Stage B crossover: at least 60 valid actions; each pressure group has at least
   10 expansions and 10 shrinkages, with 3 pre-action windows, 20 seconds of
   settling, and 3 post-action label windows.

@@ -612,8 +612,15 @@ def train_blackbox_model(
                     "predicted_gain_pct": predicted,
                     "actual_direction": _effect_direction(float(row["label_gain_pct"])),
                     "predicted_direction": _effect_direction(predicted),
-                    "direction_correct": _effect_direction(predicted)
-                    == _effect_direction(float(row["label_gain_pct"])),
+                    "actual_action_beneficial": float(row["label_gain_pct"])
+                    > EQUIVALENCE_BAND_PCT,
+                    "predicted_action_beneficial": predicted
+                    > EQUIVALENCE_BAND_PCT,
+                    "direction_correct": (
+                        predicted > EQUIVALENCE_BAND_PCT
+                    ) == (
+                        float(row["label_gain_pct"]) > EQUIVALENCE_BAND_PCT
+                    ),
                     **{f"contribution_{key}": value for key, value in contributions.items()},
                 })
     _write_csv(output / "blackbox-lolo-predictions.csv", predictions)
@@ -675,7 +682,7 @@ def train_blackbox_model(
             "direction_diversity": direction_diversity,
         },
         "validation": {
-            "method": "leave-one-load-out",
+            "method": "leave-one-load-out action-benefit classification",
             "predictions": len(predictions),
             "direction_accuracy": accuracy,
             "minimum_coverage": 0.90,
