@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from prism_sampler.blackbox_validation import execute_stage_d, validate_shadow
+from prism_sampler.blackbox_validation import (
+    _probe_host_isolation,
+    execute_stage_d,
+    validate_shadow,
+)
+from prism_sampler.remote import CommandResult
 
 
 def _write_jsonl(path, rows):
@@ -130,6 +135,22 @@ def test_shadow_gate_rejects_contaminated_calibration_host(tmp_path):
 
     assert not report["passed"]
     assert not report["calibration_environment"]["isolated"]
+
+
+def test_host_isolation_probe_rejects_busy_node():
+    host = type("Host", (), {
+        "run": lambda self, command, timeout: CommandResult(
+            command,
+            0,
+            '{"node_cpu_utilization":{"0":0.01,"1":0.25}}\n',
+            "",
+        )
+    })()
+
+    report = _probe_host_isolation(host)
+
+    assert not report["isolated"]
+    assert report["maximum_allowed_node_utilization"] == 0.10
 
 
 def test_shadow_gate_rejects_missing_three_window_confirmation(tmp_path):

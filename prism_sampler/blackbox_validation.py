@@ -63,6 +63,72 @@ def _find_experiment(name: str, before: set[Path]) -> Path:
     return matches.pop()
 
 
+def _probe_host_isolation(host: Host) -> dict[str, Any]:
+    command = r"""python3 - <<'PY'
+import glob
+import json
+import time
+
+def cpu_list(value):
+    cpus = set()
+    for item in value.strip().split(','):
+        if '-' in item:
+            start, end = (int(part) for part in item.split('-', 1))
+            cpus.update(range(start, end + 1))
+        elif item:
+            cpus.add(int(item))
+    return cpus
+
+def counters():
+    result = {}
+    with open('/proc/stat', encoding='ascii') as stream:
+        for line in stream:
+            fields = line.split()
+            if not fields or not fields[0].startswith('cpu') or not fields[0][3:].isdigit():
+                continue
+            values = [int(value) for value in fields[1:]]
+            result[int(fields[0][3:])] = (sum(values), values[3] + values[4])
+    return result
+
+nodes = {}
+for path in glob.glob('/sys/devices/system/node/node[0-9]*/cpulist'):
+    node = int(path.rsplit('/node', 1)[1].split('/', 1)[0])
+    with open(path, encoding='ascii') as stream:
+        nodes[node] = cpu_list(stream.read())
+before = counters()
+time.sleep(3)
+after = counters()
+utilization = {}
+for node, cpus in nodes.items():
+    busy = total = 0
+    for cpu in cpus:
+        if cpu not in before or cpu not in after:
+            continue
+        total_delta = after[cpu][0] - before[cpu][0]
+        idle_delta = after[cpu][1] - before[cpu][1]
+        if total_delta > 0:
+            total += total_delta
+            busy += total_delta - idle_delta
+    utilization[str(node)] = busy / total if total else None
+print(json.dumps({'node_cpu_utilization': utilization}, sort_keys=True))
+PY"""
+    result = json.loads(host.run(command, timeout=10).stdout.strip().splitlines()[-1])
+    values = [
+        float(value)
+        for value in result.get("node_cpu_utilization", {}).values()
+        if value is not None
+    ]
+    result.update({
+        "maximum_allowed_node_utilization": (
+            MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
+        ),
+        "isolated": bool(
+            values and max(values) <= MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
+        ),
+    })
+    return result
+
+
 def _run(
     generated: Path,
     selected: Path,
@@ -74,6 +140,16 @@ def _run(
     initial: str,
     name: str,
 ) -> Path:
+    isolation = _probe_host_isolation(Host("kunpen183"))
+    isolation_path = generated / f"{name}-host-isolation.json"
+    isolation_path.write_text(
+        json.dumps(isolation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if not isolation["isolated"]:
+        raise RuntimeError(
+            "kunpen183 is not isolated for calibration: "
+            f"{isolation['node_cpu_utilization']}"
+        )
     local = generated / f"{name}-local.toml"
     remote = generated / f"{name}-remote.toml"
     remote_model = Path("/home/xhc/.config/prism-sampler/blackbox-g-scale.json")
