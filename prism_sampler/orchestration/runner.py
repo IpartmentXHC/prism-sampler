@@ -19,6 +19,13 @@ from ..platform import probe
 from ..remote import Host
 
 
+def sampling_requests(config: SamplerConfig, plugin: str) -> bool:
+    profile_name = str(config.sampling.get("profile", "policy"))
+    profile = config.values["sampling_profiles"][profile_name]
+    requested = list(profile.get("required", [])) + list(profile.get("optional", []))
+    return plugin in requested
+
+
 def preflight(config: SamplerConfig) -> dict[str, Any]:
     missing = validate_config(config)
     if missing:
@@ -193,6 +200,8 @@ def run_yba_suite(
     if resume:
         command.append("--resume")
     returncode = subprocess.run(command, cwd=yba_root, env=env, check=False).returncode
+    if not sampling_requests(config, "prism"):
+        return returncode
     finalized = _collect_suite_runs(config, experiment_root, suite_dir)
     if finalized:
         from ..relations import analyze_experiment

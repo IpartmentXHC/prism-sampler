@@ -5,7 +5,29 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from prism_sampler.orchestration.runner import _collect_suite_runs
+from prism_sampler.orchestration.runner import _collect_suite_runs, sampling_requests
+
+
+class SamplingProfileTest(unittest.TestCase):
+    def test_prism_request_includes_required_and_optional_plugins(self):
+        config = Mock()
+        config.sampling = {"profile": "without-prism"}
+        config.values = {
+            "sampling_profiles": {
+                "without-prism": {
+                    "required": [],
+                    "optional": ["phase-marker"],
+                },
+                "optional-prism": {
+                    "required": [],
+                    "optional": ["prism"],
+                },
+            }
+        }
+
+        self.assertFalse(sampling_requests(config, "prism"))
+        config.sampling = {"profile": "optional-prism"}
+        self.assertTrue(sampling_requests(config, "prism"))
 
 
 class SuiteCollectionResumeTest(unittest.TestCase):
