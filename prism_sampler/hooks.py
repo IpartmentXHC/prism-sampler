@@ -238,9 +238,19 @@ def handle(
         )
         collector = CollectionSession(config, session_context)
         collector.restore(state["health"])
-        collector.stop(copy=True)
+        stopped_health = collector.stop(copy=True)
         phase_context = _append_event(phase_path, "collector_stopped", context)
-        health = validate_raw(run_dir)
+        if "prism" in collector.requested:
+            health = validate_raw(run_dir)
+        else:
+            health = {
+                "schema": "prism-sampler.raw-health.v1",
+                "status": "not_applicable",
+                "reason": "sampling profile does not request prism",
+                "raw_db": None,
+                "table_rows": {},
+                "collection": stopped_health,
+            }
         state_path.unlink(missing_ok=True)
         return {
             "event": event,
