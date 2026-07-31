@@ -59,11 +59,7 @@ FEATURES = (
 # separate coefficients for the correlated PMU, NUMA, and relationship
 # signals.  Keep those signals as context and G_place evidence until targeted
 # perturbations make their causal contribution identifiable.
-G_SCALE_FEATURES = (
-    "run_pressure",
-    "rq_pressure",
-    "allowed_node_utilization",
-)
+G_SCALE_FEATURES = ("run_pressure",)
 
 
 class BlackboxGainEstimate:
@@ -80,10 +76,11 @@ class BlackboxGScaleModel:
         if value.get("schema") != SCHEMA:
             raise ValueError(f"unsupported blackbox model schema: {value.get('schema')}")
         self.raw = value
-        self.models = value["model"]["directions"]
+        self.capacity_model = value["model"].get("capacity_advantage")
+        self.models = value["model"].get("directions", {})
 
     def estimate(self, direction: str, features: dict[str, Any]) -> BlackboxGainEstimate:
-        raw_model = self.models[direction]
+        raw_model = self.capacity_model or self.models[direction]
         names = list(raw_model["feature_names"])
         raw = np.asarray([
             np.nan if _finite(features.get(name)) is None else float(features[name])
@@ -92,6 +89,8 @@ class BlackboxGScaleModel:
         impute = np.asarray(raw_model["impute"])
         center = np.asarray(raw_model["center"])
         scale = np.asarray(raw_model["scale"])
+        lower = np.asarray(raw_model.get("support_lower", raw_model["center"]))
+        upper = np.asarray(raw_model.get("support_upper", raw_model["center"]))
         coefficients = np.asarray(raw_model["coefficients"])
         present = np.isfinite(raw)
         values = np.where(present, raw, impute)
@@ -100,10 +99,16 @@ class BlackboxGScaleModel:
             name: float(coefficient * value)
             for name, coefficient, value in zip(names, coefficients, normalized)
         }
-        distance = float(math.sqrt(np.mean(np.square(normalized))))
+        below = np.maximum(lower - values, 0.0)
+        above = np.maximum(values - upper, 0.0)
+        support_distance = (below + above) / scale
+        distance = float(math.sqrt(np.mean(np.square(support_distance))))
         coverage = float(np.mean(present))
+        expected = float(raw_model["intercept"] + sum(contributions.values()))
+        if self.capacity_model and direction == "shrink":
+            expected = _shrink_gain(expected)
         return BlackboxGainEstimate(
-            float(raw_model["intercept"] + sum(contributions.values())),
+            expected,
             distance,
             coverage * math.exp(-0.5 * distance * distance),
             coverage,
@@ -249,6 +254,28 @@ def _effect_direction(value: float) -> int:
     if value < -EQUIVALENCE_BAND_PCT:
         return -1
     return 0
+
+
+def _capacity_advantage(direction: str, action_gain_pct: float) -> float:
+    if direction == "expand":
+        return action_gain_pct
+    if action_gain_pct <= -100:
+        raise ValueError("shrink gain must be greater than -100%")
+    return -100 * action_gain_pct / (100 + action_gain_pct)
+
+
+def _shrink_gain(capacity_advantage_pct: float) -> float:
+    if capacity_advantage_pct <= -100:
+        return float("inf")
+    return -100 * capacity_advantage_pct / (100 + capacity_advantage_pct)
+
+
+def _action_gain(direction: str, capacity_advantage_pct: float) -> float:
+    return (
+        capacity_advantage_pct
+        if direction == "expand"
+        else _shrink_gain(capacity_advantage_pct)
+    )
 
 
 def _median(rows: Iterable[dict[str, Any]], key: str) -> float | None:
@@ -531,6 +558,8 @@ def _fit_ridge(
         "impute": medians,
         "center": center,
         "scale": scale,
+        "support_lower": np.min(values, axis=0),
+        "support_upper": np.max(values, axis=0),
         "intercept": float(coefficients[0]),
         "coefficients": coefficients[1:],
     }
@@ -567,6 +596,8 @@ def _serializable_model(model: dict[str, Any]) -> dict[str, Any]:
         "impute": model["impute"].tolist(),
         "center": model["center"].tolist(),
         "scale": model["scale"].tolist(),
+        "support_lower": model["support_lower"].tolist(),
+        "support_upper": model["support_upper"].tolist(),
         "intercept": model["intercept"],
         "coefficients": model["coefficients"].tolist(),
     }
@@ -584,7 +615,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def train_blackbox_model(
-    experiments: list[Path], output: Path, *, alpha: float = 1.0
+    experiments: list[Path], output: Path, *, alpha: float = 0.1
 ) -> dict[str, Any]:
     for name in FEATURES:
         lowered = name.lower()
@@ -601,59 +632,48 @@ def train_blackbox_model(
     groups = sorted({str(row["validation_group"]) for row in valid})
     predictions = []
     for held_out in groups:
-        for direction in ("expand", "shrink"):
-            training = [
-                row for row in valid
-                if row["validation_group"] != held_out and row["direction"] == direction
-            ]
-            testing = [
-                row for row in valid
-                if row["validation_group"] == held_out and row["direction"] == direction
-            ]
-            if not training:
-                continue
-            usable = set(_usable_features(training))
-            model = _fit_ridge(
-                training,
-                tuple(name for name in G_SCALE_FEATURES if name in usable),
-                alpha,
-            )
-            for row in testing:
-                predicted, contributions = _predict(model, row)
-                predictions.append({
-                    "experiment": row["experiment"],
-                    "validation_group": held_out,
-                    "direction": direction,
-                    "actual_gain_pct": row["label_gain_pct"],
-                    "predicted_gain_pct": predicted,
-                    "actual_direction": _effect_direction(float(row["label_gain_pct"])),
-                    "predicted_direction": _effect_direction(predicted),
-                    "actual_action_beneficial": float(row["label_gain_pct"])
-                    > EQUIVALENCE_BAND_PCT,
-                    "predicted_action_beneficial": predicted
-                    > EQUIVALENCE_BAND_PCT,
-                    "direction_correct": (
-                        predicted > EQUIVALENCE_BAND_PCT
-                    ) == (
-                        float(row["label_gain_pct"]) > EQUIVALENCE_BAND_PCT
-                    ),
-                    **{f"contribution_{key}": value for key, value in contributions.items()},
-                })
+        training = [
+            {**row, "label_gain_pct": _capacity_advantage(
+                str(row["direction"]), float(row["label_gain_pct"])
+            )}
+            for row in valid if row["validation_group"] != held_out
+        ]
+        testing = [row for row in valid if row["validation_group"] == held_out]
+        model = _fit_ridge(training, G_SCALE_FEATURES, alpha)
+        for row in testing:
+            capacity_gain, contributions = _predict(model, row)
+            predicted = _action_gain(str(row["direction"]), capacity_gain)
+            actual = float(row["label_gain_pct"])
+            predictions.append({
+                "experiment": row["experiment"],
+                "validation_group": held_out,
+                "direction": row["direction"],
+                "actual_gain_pct": actual,
+                "predicted_gain_pct": predicted,
+                "predicted_capacity_advantage_pct": capacity_gain,
+                "actual_direction": _effect_direction(actual),
+                "predicted_direction": _effect_direction(predicted),
+                "actual_action_beneficial": actual > EQUIVALENCE_BAND_PCT,
+                "predicted_action_beneficial": predicted > EQUIVALENCE_BAND_PCT,
+                "direction_correct": (
+                    predicted > EQUIVALENCE_BAND_PCT
+                ) == (
+                    actual > EQUIVALENCE_BAND_PCT
+                ),
+                **{f"contribution_{key}": value for key, value in contributions.items()},
+            })
     _write_csv(output / "blackbox-lolo-predictions.csv", predictions)
-    models = {}
     contributions = []
     direction_diversity = {}
+    capacity_rows = [
+        {**row, "label_gain_pct": _capacity_advantage(
+            str(row["direction"]), float(row["label_gain_pct"])
+        )}
+        for row in valid
+    ]
+    model = _fit_ridge(capacity_rows, G_SCALE_FEATURES, alpha)
     for direction in ("expand", "shrink"):
         selected = [row for row in valid if row["direction"] == direction]
-        if not selected:
-            continue
-        usable = set(_usable_features(selected))
-        model = _fit_ridge(
-            selected,
-            tuple(name for name in G_SCALE_FEATURES if name in usable),
-            alpha,
-        )
-        models[direction] = _serializable_model(model)
         gains = [float(row["label_gain_pct"]) for row in selected]
         direction_diversity[direction] = {
             "positive": sum(_effect_direction(value) > 0 for value in gains),
@@ -661,7 +681,8 @@ def train_blackbox_model(
             "negative": sum(_effect_direction(value) < 0 for value in gains),
         }
         for row in selected:
-            predicted, values = _predict(model, row)
+            capacity_gain, values = _predict(model, row)
+            predicted = _action_gain(direction, capacity_gain)
             for feature in FEATURES:
                 contributions.append({
                     "experiment": row["experiment"],
@@ -673,6 +694,7 @@ def train_blackbox_model(
                     ),
                     "contribution_pct_points": values.get(feature),
                     "predicted_gain_pct": predicted,
+                    "predicted_capacity_advantage_pct": capacity_gain,
                 })
     _write_csv(output / "blackbox-action-contributions.csv", contributions)
     feature_coverage = {
@@ -716,18 +738,14 @@ def train_blackbox_model(
             "passed": coverage >= 0.90 and accuracy >= 0.80 and identifiable,
         },
         "model": {
-            "type": "separate-direction robust-scaled ridge with layered features",
+            "type": "reciprocal capacity-advantage robust-scaled ridge",
             "alpha": alpha,
             "minimum_training_feature_coverage": 0.5,
             "decision_features": list(G_SCALE_FEATURES),
             "context_or_g_place_features": sorted(set(FEATURES) - set(G_SCALE_FEATURES)),
-            "excluded_features": sorted(
-                set(FEATURES)
-                - set().union(*(
-                    set(value["feature_names"]) for value in models.values()
-                ))
-            ),
-            "directions": models,
+            "shrink_transform": "-100 * E / (100 + E)",
+            "capacity_advantage": _serializable_model(model),
+            "excluded_features": sorted(set(FEATURES) - set(G_SCALE_FEATURES)),
         },
     }
     (output / "blackbox-g-scale.json").write_text(

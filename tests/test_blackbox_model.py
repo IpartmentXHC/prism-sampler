@@ -17,7 +17,7 @@ from prism_sampler.controller.blackbox_model import (
 )
 from prism_sampler.controller.config import ControllerConfig
 from prism_sampler.controller.models import MetricSample
-from prism_sampler.controller.policy import BlackboxBenefitPolicy
+from prism_sampler.controller.policy import BlackboxBenefitPolicy, ScalingState
 
 
 def _experiment(root, name: str, phase: str, gain: float):
@@ -128,8 +128,47 @@ def test_g_scale_keeps_relationship_scores_out_of_capacity_regression(tmp_path):
     report = train_blackbox_model(experiments, tmp_path / "output")
 
     assert report["model"]["decision_features"] == list(G_SCALE_FEATURES)
-    for model in report["model"]["directions"].values():
-        assert not any(name.startswith("r_") for name in model["feature_names"])
+    model = report["model"]["capacity_advantage"]
+    assert not any(name.startswith("r_") for name in model["feature_names"])
+
+
+def test_capacity_model_uses_reciprocal_shrink_gain():
+    direction = {
+        "feature_names": ["run_pressure"],
+        "impute": [0.5],
+        "center": [0.5],
+        "scale": [1.0],
+        "intercept": 25.0,
+        "coefficients": [0.0],
+    }
+    model = BlackboxGScaleModel({
+        "schema": SCHEMA,
+        "model": {"capacity_advantage": direction},
+    })
+
+    assert model.estimate("expand", {"run_pressure": 0.5}).expected_gain_pct == 25
+    assert model.estimate("shrink", {"run_pressure": 0.5}).expected_gain_pct == -20
+
+
+def test_model_confidence_measures_distance_outside_training_support():
+    direction = {
+        "feature_names": ["run_pressure"],
+        "impute": [0.5],
+        "center": [0.5],
+        "scale": [0.5],
+        "support_lower": [0.0],
+        "support_upper": [1.0],
+        "intercept": 0.0,
+        "coefficients": [1.0],
+    }
+    model = BlackboxGScaleModel({
+        "schema": SCHEMA,
+        "model": {"capacity_advantage": direction},
+    })
+
+    assert model.estimate("expand", {"run_pressure": 0.0}).confidence == 1.0
+    assert model.estimate("expand", {"run_pressure": 1.0}).confidence == 1.0
+    assert model.estimate("expand", {"run_pressure": 1.5}).confidence < 1.0
 
 
 def _online_model(gain: float = 5.0) -> BlackboxGScaleModel:
@@ -178,6 +217,24 @@ def test_blackbox_policy_cannot_observe_application_kpi():
     assert [item.to_dict() for item in low] == [item.to_dict() for item in high]
     assert low[-1].action == "expand"
     assert low[-1].model_confidence == pytest.approx(1.0)
+
+
+def test_blackbox_policy_allows_shrink_within_oracle_loss_budget():
+    config = ControllerConfig(
+        decision_window_samples=3,
+        cooldown_seconds=0,
+        minimum_two_node_dwell_seconds=0,
+        minimum_model_confidence=0.8,
+        minimum_feature_coverage=0.8,
+        minimum_expected_gain_pct=2.0,
+    )
+    policy = BlackboxBenefitPolicy(config, _online_model(-1.0))
+    policy.force_state(ScalingState.TWO_NODE)
+
+    decisions = [policy.evaluate(_sample(index, 1.0)) for index in range(1, 4)]
+
+    assert decisions[-1].action == "shrink"
+    assert decisions[-1].expected_gain_pct == pytest.approx(-1.0)
 
 
 def test_live_system_features_use_proc_without_kpi():

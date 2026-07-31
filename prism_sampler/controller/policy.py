@@ -590,7 +590,12 @@ class BlackboxBenefitPolicy(PressurePolicy):
         ):
             self.matches = 0
             return self._decision(sample, "insufficient_system_evidence", estimate)
-        beneficial = estimate.expected_gain_pct >= self.config.minimum_expected_gain_pct
+        gain_gate = (
+            self.config.minimum_expected_gain_pct
+            if direction == "expand"
+            else -self.config.minimum_expected_gain_pct
+        )
+        beneficial = estimate.expected_gain_pct >= gain_gate
         if not beneficial and not high_pressure:
             self.matches = 0
             self.last_recommendation = None
