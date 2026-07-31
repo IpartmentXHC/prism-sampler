@@ -59,6 +59,11 @@ def _shadow_experiment(root, name: str, action: str):
         "controller": {"use_workload_activity_marker": False},
         "online_input_mode": "system_blackbox",
     }))
+    (experiment / "controller" / "host-isolation.json").write_text(json.dumps({
+        "required_nodes": [0, 1],
+        "node_cpu_utilization": {"0": 0.01, "1": 0.02, "3": 0.95},
+        "isolated": True,
+    }))
     return experiment
 
 
@@ -120,16 +125,15 @@ def test_shadow_gate_reports_missing_model_recommendations(tmp_path):
     assert report["minimum_recommendation_feature_coverage"] is None
 
 
-def test_shadow_gate_rejects_contaminated_calibration_host(tmp_path):
+def test_shadow_gate_rejects_failed_host_isolation_preflight(tmp_path):
     experiments = [
         _shadow_experiment(tmp_path, "one", "expand"),
         _shadow_experiment(tmp_path, "two", "shrink"),
     ]
-    path = experiments[0] / "controller" / "samples.jsonl"
-    rows = _read_jsonl(path)
-    for row in rows:
-        row["system_features"]["unused_node_utilization"] = 0.25
-    _write_jsonl(path, rows)
+    path = experiments[0] / "controller" / "host-isolation.json"
+    report = json.loads(path.read_text())
+    report["isolated"] = False
+    path.write_text(json.dumps(report))
 
     report = validate_shadow(experiments, tmp_path / "report.json")
 
@@ -137,7 +141,7 @@ def test_shadow_gate_rejects_contaminated_calibration_host(tmp_path):
     assert not report["calibration_environment"]["isolated"]
 
 
-def test_host_isolation_probe_rejects_busy_node():
+def test_host_isolation_probe_rejects_busy_required_node():
     host = type("Host", (), {
         "run": lambda self, command, timeout: CommandResult(
             command,
@@ -151,6 +155,22 @@ def test_host_isolation_probe_rejects_busy_node():
 
     assert not report["isolated"]
     assert report["maximum_allowed_node_utilization"] == 0.10
+
+
+def test_host_isolation_probe_allows_busy_unrelated_node():
+    host = type("Host", (), {
+        "run": lambda self, command, timeout: CommandResult(
+            command,
+            0,
+            '{"node_cpu_utilization":{"0":0.01,"1":0.02,"3":0.95}}\n',
+            "",
+        )
+    })()
+
+    report = _probe_host_isolation(host)
+
+    assert report["isolated"]
+    assert report["required_nodes"] == [0, 1]
 
 
 def test_shadow_gate_rejects_missing_three_window_confirmation(tmp_path):

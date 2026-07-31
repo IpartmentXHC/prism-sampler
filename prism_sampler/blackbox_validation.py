@@ -63,7 +63,9 @@ def _find_experiment(name: str, before: set[Path]) -> Path:
     return matches.pop()
 
 
-def _probe_host_isolation(host: Host) -> dict[str, Any]:
+def _probe_host_isolation(
+    host: Host, required_nodes: tuple[int, ...] = (0, 1)
+) -> dict[str, Any]:
     command = r"""python3 - <<'PY'
 import glob
 import json
@@ -113,17 +115,18 @@ for node, cpus in nodes.items():
 print(json.dumps({'node_cpu_utilization': utilization}, sort_keys=True))
 PY"""
     result = json.loads(host.run(command, timeout=10).stdout.strip().splitlines()[-1])
-    values = [
-        float(value)
-        for value in result.get("node_cpu_utilization", {}).values()
-        if value is not None
-    ]
+    utilization = result.get("node_cpu_utilization", {})
+    values = [utilization.get(str(node)) for node in required_nodes]
     result.update({
+        "required_nodes": list(required_nodes),
         "maximum_allowed_node_utilization": (
             MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
         ),
         "isolated": bool(
-            values and max(values) <= MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
+            values
+            and all(value is not None for value in values)
+            and max(float(value) for value in values)
+            <= MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
         ),
     })
     return result
@@ -175,7 +178,13 @@ def _run(
         )
     if code:
         raise RuntimeError(f"YBA returned {code}: {name}")
-    return _find_experiment(name, before)
+    experiment = _find_experiment(name, before)
+    experiment_isolation = experiment / "controller" / "host-isolation.json"
+    experiment_isolation.parent.mkdir(parents=True, exist_ok=True)
+    experiment_isolation.write_text(
+        json.dumps(isolation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return experiment
 
 
 def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
@@ -186,7 +195,13 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
     confirmation_failures = 0
     repeated_within_minute = 0
     activity_marker_enabled = 0
+    isolation_reports: list[dict[str, Any]] = []
     for experiment in experiments:
+        isolation_path = experiment / "controller" / "host-isolation.json"
+        if isolation_path.is_file():
+            isolation_reports.append(
+                json.loads(isolation_path.read_text(encoding="utf-8"))
+            )
         resolved_path = experiment / "controller" / "resolved-config.json"
         if resolved_path.is_file():
             resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
@@ -240,9 +255,8 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
         is not None
     ]
     isolated_environment = bool(
-        unused_node_utilization
-        and statistics.median(unused_node_utilization)
-        <= MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
+        len(isolation_reports) == len(experiments)
+        and all(report.get("isolated") for report in isolation_reports)
     )
     online_kpi_rows = sum(bool(row.get("kpi")) for row in samples)
     online_database_rows = sum(bool(row.get("clickhouse_metrics")) for row in samples)
@@ -269,13 +283,11 @@ def validate_shadow(experiments: list[Path], output: Path) -> dict[str, Any]:
             default=None,
         ),
         "calibration_environment": {
+            "host_isolation_reports": isolation_reports,
             "unused_node_windows": len(unused_node_utilization),
             "median_unused_node_utilization": (
                 statistics.median(unused_node_utilization)
                 if unused_node_utilization else None
-            ),
-            "maximum_median_unused_node_utilization": (
-                MAXIMUM_ISOLATED_UNUSED_NODE_UTILIZATION
             ),
             "isolated": isolated_environment,
         },
