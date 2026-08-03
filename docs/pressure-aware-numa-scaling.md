@@ -1,5 +1,10 @@
 # Pressure-Aware NUMA Scaling v2
 
+> Historical design note (2026-07): this version used online YBA throughput and
+> P99 for decisions and rollback. The current production contract is the pure
+> system black-box design in `system-blackbox-scheduling.md`; YBA KPI is now
+> offline supervision and acceptance evidence only.
+
 The controller chooses between two calibrated ClickHouse resource states in one
 lifecycle:
 

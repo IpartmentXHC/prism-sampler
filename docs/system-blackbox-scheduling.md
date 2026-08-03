@@ -28,6 +28,14 @@ with less than 50% coverage in training are excluded rather than imputed into
 an unsupported online signal. A 2% equivalence band separates measurable
 positive/negative actions from experimental noise.
 
+The deployment objective is different from that noise band. Offline resource
+selection chooses the smallest state whose throughput is at least 90% of the
+best measured state. Consequently ONE remains acceptable while
+`throughput(ONE) / throughput(TWO) >= 0.90`; expansion requires TWO to have a
+repeatable advantage greater than `1 / 0.90 - 1 = 11.11%`. The online model
+predicts this capacity advantage from `P_ref + B_ctx`; it does not observe the
+throughput ratio in production.
+
 ## System Features
 
 - `/proc`: running CPU equivalents, runqueue CPU equivalents, node utilization,
@@ -74,8 +82,24 @@ project does not depend on `sched_ext`.
   coverage at least 0.8, three-window confirmation, no capacity overflow, no
   repeated recommendation within 60 seconds, and zero online KPI rows.
 - Stage D active: runs only after all shadow gates pass. Final YBA throughput
-  must reach at least 98% of the static oracle in aggregate; this is an offline
-  acceptance check, not an online signal.
+  must reach the configured offline acceptance target. Resource-curve v1 uses
+  at least 90% of static maximum throughput while minimizing node count; a
+  stricter 98% oracle score may still be reported as a secondary maximum-
+  throughput metric. Neither value is an online signal.
+
+## Versioned Resource Curve
+
+`prism-sampler resource-curve build` turns matched ONE/TWO anchors, the P_ref
+mapping, and optional G evidence into a versioned calibration bundle. A bundle
+is `active_eligible` only when every anchor has at least three matched rounds,
+the pressure mapping passes leave-one-load-out MAE/P95 gates, and robust curve
+residual exclusions stay below 10%. Legacy ONE configurations and under-
+repeated cells remain in the audit files but cannot activate the policy.
+
+Residual disagreement is not permission to delete a point. A suspect cell is
+retested with two matched rounds; a repeated deviation becomes a `B_ctx`
+branch or an uncertain hold region. `retest-proposal.csv` records the exact
+missing measurements.
 
 The controller cannot claim to observe throughput in production. Its claim is
 limited to predicting action benefit from system pressure and relationship

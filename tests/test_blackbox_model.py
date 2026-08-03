@@ -171,7 +171,7 @@ def test_model_confidence_measures_distance_outside_training_support():
     assert model.estimate("expand", {"run_pressure": 1.5}).confidence < 1.0
 
 
-def _online_model(gain: float = 5.0) -> BlackboxGScaleModel:
+def _online_model(gain: float = 20.0) -> BlackboxGScaleModel:
     direction = {
         "feature_names": ["run_pressure", "rq_pressure"],
         "impute": [0.5, 0.1],
@@ -235,6 +235,45 @@ def test_blackbox_policy_allows_shrink_within_oracle_loss_budget():
 
     assert decisions[-1].action == "shrink"
     assert decisions[-1].expected_gain_pct == pytest.approx(-1.0)
+
+
+def test_blackbox_policy_uses_ninety_percent_resource_target():
+    config = ControllerConfig(
+        decision_window_samples=3,
+        cooldown_seconds=0,
+        minimum_model_confidence=0.8,
+        minimum_feature_coverage=0.8,
+        minimum_oracle_ratio=0.90,
+    )
+    policy = BlackboxBenefitPolicy(config, _online_model(10.0))
+
+    decisions = [policy.evaluate(_sample(index, 1.0)) for index in range(1, 4)]
+
+    assert decisions[-1].action is None
+    assert decisions[-1].reason == "predicted_gain_below_gate"
+
+
+def test_blackbox_policy_has_startup_high_pressure_expand_fast_path():
+    config = ControllerConfig(
+        decision_window_samples=3,
+        cooldown_seconds=0,
+        minimum_oracle_ratio=0.90,
+    )
+    policy = BlackboxBenefitPolicy(config, _online_model(0.0))
+    value = _sample(1, 1.0)
+    value = MetricSample(
+        **{
+            **value.to_dict(),
+            "run_pressure": 0.95,
+            "rq_pressure": 0.60,
+            "system_features": {"run_pressure": 0.95, "rq_pressure": 0.60},
+        }
+    )
+
+    decision = policy.evaluate(value)
+
+    assert decision.action == "expand"
+    assert decision.reason == "startup_pressure_safety_expand"
 
 
 def test_live_system_features_use_proc_without_kpi():

@@ -29,6 +29,9 @@ class ControllerConfig:
     minimum_model_confidence: float = 0.8
     minimum_feature_coverage: float = 0.8
     minimum_expected_gain_pct: float = 2.0
+    minimum_oracle_ratio: float = 0.90
+    measurement_equivalence_pct: float = 2.0
+    startup_fast_expand: bool = True
     maximum_signature_distance: float = 0.75
     maximum_model_distance: float = 2.5
     gain_uncertainty_multiplier: float = 0.5
@@ -101,6 +104,7 @@ class ControllerConfig:
             "minimum_two_node_dwell_seconds",
             "cooldown_seconds",
             "minimum_expected_gain_pct",
+            "measurement_equivalence_pct",
             "minimum_model_confidence",
             "minimum_feature_coverage",
             "maximum_signature_distance",
@@ -120,6 +124,8 @@ class ControllerConfig:
         for name in ("minimum_model_confidence", "minimum_feature_coverage"):
             if getattr(self, name) > 1:
                 raise ValueError(f"controller.{name} cannot exceed 1")
+        if not 0 < self.minimum_oracle_ratio <= 1:
+            raise ValueError("controller.minimum_oracle_ratio must be in (0, 1]")
         for name in ("one_node_slots", "two_node_slots", "fixed_max_threads"):
             if getattr(self, name) < 0:
                 raise ValueError(f"controller.{name} cannot be negative")

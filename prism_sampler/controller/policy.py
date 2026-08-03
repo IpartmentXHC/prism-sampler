@@ -534,6 +534,7 @@ class BlackboxBenefitPolicy(PressurePolicy):
         self.model = model
         self.matches = 0
         self.last_recommendation: ScalingState | None = None
+        self.valid_samples_seen = 0
 
     def force_state(self, state: ScalingState, timestamp_ns: int | None = None) -> None:
         super().force_state(state, timestamp_ns)
@@ -572,6 +573,7 @@ class BlackboxBenefitPolicy(PressurePolicy):
         if not sample.valid:
             self.matches = 0
             return self._decision(sample, "invalid_sample")
+        self.valid_samples_seen += 1
         direction = "expand" if self.state == ScalingState.ONE_NODE else "shrink"
         estimate = self.model.estimate(direction, sample.system_features)
         high_pressure = bool(
@@ -590,10 +592,11 @@ class BlackboxBenefitPolicy(PressurePolicy):
         ):
             self.matches = 0
             return self._decision(sample, "insufficient_system_evidence", estimate)
+        maximum_loss_pct = 100.0 * (1.0 - self.config.minimum_oracle_ratio)
         gain_gate = (
-            self.config.minimum_expected_gain_pct
+            100.0 * (1.0 / self.config.minimum_oracle_ratio - 1.0)
             if direction == "expand"
-            else -self.config.minimum_expected_gain_pct
+            else -maximum_loss_pct
         )
         beneficial = estimate.expected_gain_pct >= gain_gate
         if not beneficial and not high_pressure:
@@ -604,6 +607,25 @@ class BlackboxBenefitPolicy(PressurePolicy):
             ScalingState.TWO_NODE
             if self.state == ScalingState.ONE_NODE else ScalingState.ONE_NODE
         )
+        fast_expand = bool(
+            high_pressure
+            and self.config.startup_fast_expand
+            and (self.valid_samples_seen == 1 or self.last_action == "shrink")
+        )
+        if fast_expand:
+            current = self.state
+            self.state = target
+            self.last_action = "expand"
+            self.last_transition_ns = sample.monotonic_ns
+            self.last_recommendation = target
+            self.matches = 0
+            return self._decision(
+                sample,
+                "startup_pressure_safety_expand",
+                estimate,
+                "expand",
+                current,
+            )
         self.matches += 1
         if self.matches < self.config.decision_window_samples:
             return self._decision(sample, "system_gain_confirming", estimate)

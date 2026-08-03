@@ -24,6 +24,11 @@ from .hooks import handle
 from .orchestration import preflight, run_yba, run_yba_suite
 from .platform import probe, write_report
 from .place_calibration import execute_stage_c
+from .resource_curve import (
+    build_resource_curve,
+    render_resource_curve,
+    validate_resource_curve,
+)
 from .pressure_v2 import (
     analyze_calibration,
     analyze_combined_calibration,
@@ -202,6 +207,26 @@ def build_parser() -> argparse.ArgumentParser:
     pressure_stage_d.add_argument("--manifest", required=True, type=Path)
     pressure_stage_d.add_argument("--anchors", required=True, type=Path)
     pressure_stage_d.add_argument("--skip-deploy", action="store_true")
+
+    resource_curve = commands.add_parser("resource-curve")
+    resource_curve_sub = resource_curve.add_subparsers(
+        dest="resource_curve_command", required=True
+    )
+    resource_build = resource_curve_sub.add_parser("build")
+    resource_build.add_argument("--anchors", required=True, type=Path)
+    resource_build.add_argument("--pressure-anchors", required=True, type=Path)
+    resource_build.add_argument("--pressure-model", required=True, type=Path)
+    resource_build.add_argument("--g-model", type=Path)
+    resource_build.add_argument("--output", required=True, type=Path)
+    resource_build.add_argument("--system", default="clickhouse")
+    resource_build.add_argument("--platform", default="kunpeng-920")
+    resource_build.add_argument("--minimum-oracle-ratio", type=float, default=0.90)
+    resource_build.add_argument("--measurement-equivalence-pct", type=float, default=2.0)
+    resource_validate = resource_curve_sub.add_parser("validate")
+    resource_validate.add_argument("bundle", type=Path)
+    resource_render = resource_curve_sub.add_parser("render")
+    resource_render.add_argument("bundle", type=Path)
+    resource_render.add_argument("--output", required=True, type=Path)
 
     policy = commands.add_parser("policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
@@ -409,6 +434,31 @@ def main() -> None:
             args.base_config, args.scenario, args.manifest, args.anchors,
             deploy=not args.skip_deploy,
         ), indent=2, sort_keys=True))
+    elif args.command == "resource-curve" and args.resource_curve_command == "build":
+        bundle = build_resource_curve(
+            args.anchors,
+            args.pressure_anchors,
+            args.pressure_model,
+            args.output,
+            system=args.system,
+            platform=args.platform,
+            minimum_oracle_ratio=args.minimum_oracle_ratio,
+            measurement_equivalence_pct=args.measurement_equivalence_pct,
+            g_model_path=args.g_model,
+        )
+        try:
+            render_resource_curve(
+                args.output / "calibration-bundle.json",
+                args.output / "resource-curve.png",
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name != "matplotlib":
+                raise
+        print(json.dumps(bundle, indent=2, sort_keys=True))
+    elif args.command == "resource-curve" and args.resource_curve_command == "validate":
+        print(json.dumps(validate_resource_curve(args.bundle), indent=2, sort_keys=True))
+    elif args.command == "resource-curve":
+        print(render_resource_curve(args.bundle, args.output))
     elif args.command == "pressure-v2":
         print(json.dumps(
             analyze_combined_calibration(
