@@ -10,6 +10,15 @@ from .artifacts import finalize_run
 from .calibration import calibrate_experiment
 from .blackbox_runner import execute_stage_b
 from .blackbox_validation import execute_stage_d
+from .affinitygraph_runner import (
+    approve_smoke as approve_affinitygraph_smoke,
+    diagnose_observe as diagnose_affinitygraph_observe,
+    diagnose_positive_control as diagnose_affinitygraph_positive_control,
+    execute as execute_affinitygraph,
+    execute_doris_formal as execute_affinitygraph_doris_formal,
+    recover as recover_affinitygraph,
+)
+from .affinitygraph_placement import compare_placement, export_placement
 from .config import load_config, read_toml
 from .controller.commands import controller_preflight, replay_experiment
 from .controller.blackbox_model import train_blackbox_model
@@ -228,6 +237,78 @@ def build_parser() -> argparse.ArgumentParser:
     resource_render.add_argument("bundle", type=Path)
     resource_render.add_argument("--output", required=True, type=Path)
 
+    affinitygraph = commands.add_parser("affinitygraph")
+    affinitygraph_sub = affinitygraph.add_subparsers(dest="affinitygraph_command", required=True)
+    affinitygraph_execute = affinitygraph_sub.add_parser("execute")
+    affinitygraph_execute.add_argument("--root", required=True, type=Path)
+    affinitygraph_execute.add_argument("--base-config", required=True, type=Path)
+    affinitygraph_execute.add_argument("--source", type=Path, default=Path("/data/threadState/affinitygraph"))
+    affinitygraph_execute.add_argument("--rounds", type=int, default=3)
+    affinitygraph_execute.add_argument("--seed", type=int, default=20260805)
+    affinitygraph_execute.add_argument("--allow-busy-smoke", action="store_true")
+    affinitygraph_execute.add_argument(
+        "--smoke-gates", choices=("soft", "strict"), default="soft"
+    )
+    affinitygraph_execute.add_argument("--smoke-baseline-result", type=Path)
+    affinitygraph_execute.add_argument(
+        "--system", choices=("clickhouse", "doris"), default="clickhouse"
+    )
+    affinitygraph_execute.add_argument(
+        "--smoke-load", choices=("C2T2", "C4T4", "C4T6", "C5T16")
+    )
+    affinitygraph_formal = affinitygraph_sub.add_parser("formal")
+    affinitygraph_formal.add_argument("--root", required=True, type=Path)
+    affinitygraph_formal.add_argument("--base-config", required=True, type=Path)
+    affinitygraph_formal.add_argument(
+        "--source", type=Path, default=Path("/data/threadState/affinitygraph")
+    )
+    affinitygraph_formal.add_argument(
+        "--design", choices=("doris-random-v1",), default="doris-random-v1"
+    )
+    affinitygraph_diagnose = affinitygraph_sub.add_parser("diagnose-observe")
+    affinitygraph_diagnose.add_argument("--root", required=True, type=Path)
+    affinitygraph_diagnose.add_argument("--base-config", required=True, type=Path)
+    affinitygraph_diagnose.add_argument(
+        "--source", type=Path, default=Path("/data/threadState/affinitygraph")
+    )
+    affinitygraph_diagnose.add_argument("--seconds", type=int, default=180)
+    affinitygraph_diagnose.add_argument("--seed", type=int, default=20260805)
+    affinitygraph_diagnose.add_argument(
+        "--system", choices=("clickhouse", "doris"), default="clickhouse"
+    )
+    affinitygraph_diagnose.add_argument(
+        "--load", choices=("C2T2", "C4T4", "C4T6", "C5T16"), default="C4T6"
+    )
+    affinitygraph_positive = affinitygraph_sub.add_parser("positive-control")
+    affinitygraph_positive.add_argument("--root", required=True, type=Path)
+    affinitygraph_positive.add_argument("--base-config", required=True, type=Path)
+    affinitygraph_positive.add_argument(
+        "--source", type=Path, default=Path("/data/threadState/affinitygraph")
+    )
+    affinitygraph_positive.add_argument("--seconds", type=int, default=120)
+    affinitygraph_positive.add_argument("--rounds", type=int, default=2)
+    affinitygraph_positive.add_argument("--seed", type=int, default=20260805)
+    affinitygraph_positive.add_argument(
+        "--system", choices=("clickhouse", "doris"), required=True
+    )
+    affinitygraph_positive.add_argument(
+        "--load", choices=("C2T2", "C4T4", "C4T6", "C5T16")
+    )
+    affinitygraph_approve = affinitygraph_sub.add_parser("approve-smoke")
+    affinitygraph_approve.add_argument("--root", required=True, type=Path)
+    affinitygraph_approve.add_argument("--note", required=True)
+    affinitygraph_recover = affinitygraph_sub.add_parser("recover")
+    affinitygraph_recover.add_argument("--root", required=True, type=Path)
+    affinitygraph_recover.add_argument("--note", required=True)
+    affinitygraph_recover.add_argument("--diagnostic-root", type=Path)
+    affinitygraph_export = affinitygraph_sub.add_parser("export-placement")
+    affinitygraph_export.add_argument("--run", required=True, type=Path)
+    affinitygraph_export.add_argument("--output", required=True, type=Path)
+    affinitygraph_compare = affinitygraph_sub.add_parser("compare-placement")
+    affinitygraph_compare.add_argument("--dataset", required=True, type=Path)
+    affinitygraph_compare.add_argument("--candidates", required=True, type=Path)
+    affinitygraph_compare.add_argument("--output", required=True, type=Path)
+
     policy = commands.add_parser("policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
     generate = policy_sub.add_parser("generate")
@@ -287,6 +368,41 @@ def main() -> None:
             load_config(args.config), args.yba_config, args.suite,
             experiment_root=args.experiment_root, resume=args.resume,
         ))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "execute":
+        print(json.dumps(execute_affinitygraph(
+            args.root, args.base_config, args.source, rounds=args.rounds, seed=args.seed,
+            allow_busy_smoke=args.allow_busy_smoke,
+            smoke_gates=args.smoke_gates,
+            smoke_baseline_result=args.smoke_baseline_result,
+            smoke_load=args.smoke_load,
+            system=args.system,
+        ), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "approve-smoke":
+        print(json.dumps(approve_affinitygraph_smoke(args.root, args.note), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "formal":
+        print(json.dumps(execute_affinitygraph_doris_formal(
+            args.root, args.base_config, args.source,
+        ), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "diagnose-observe":
+        print(json.dumps(diagnose_affinitygraph_observe(
+            args.root, args.base_config, args.source, seconds=args.seconds, seed=args.seed,
+            system=args.system, load=args.load,
+        ), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "positive-control":
+        print(json.dumps(diagnose_affinitygraph_positive_control(
+            args.root, args.base_config, args.source, seconds=args.seconds,
+            rounds=args.rounds, seed=args.seed, system=args.system, load=args.load,
+        ), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "recover":
+        print(json.dumps(recover_affinitygraph(
+            args.root, args.note, diagnostic_root=args.diagnostic_root,
+        ), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "export-placement":
+        print(json.dumps(export_placement(args.run, args.output), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "compare-placement":
+        print(json.dumps(compare_placement(
+            args.dataset, args.candidates, args.output,
+        ), indent=2, sort_keys=True))
     elif args.command == "collect":
         config = load_config(args.config)
         host = Host(config.target["host"])
