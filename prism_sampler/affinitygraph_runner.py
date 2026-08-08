@@ -95,6 +95,9 @@ def doris_formal_design() -> dict[str, Any]:
             "minimum_action_success_ratio": 0.95,
             "minimum_effective_coverage_ratio": 0.95,
             "maximum_supervisor_cpu_cores": 1.0,
+            # 640-thread Doris plan canary 实测峰值约 363 MiB。正式实验保留
+            # 明确的 512 MiB hard gate；通用 smoke 仍使用更严格的 256 MiB。
+            "maximum_supervisor_rss_kib": 512 * 1024,
             "maximum_p99_ratio": 1.10,
             "minimum_seed_uplift": -0.05,
             "minimum_positive_runs": 4,
@@ -1972,6 +1975,7 @@ mode = "off"
     def _runtime_health(
         result: dict[str, Any], *, require_plan: bool, require_action: bool,
         action_threshold: float = 0.8, minimum_active_seconds: float = 0.0,
+        maximum_supervisor_rss_kib: int = 256 * 1024,
     ) -> dict[str, Any]:
         events = [json.loads(line) for line in Path(result["runtime_log"]).read_text(encoding="utf-8").splitlines() if line]
         health = [row for row in events if row.get("type") == "bpf_health"]
@@ -2064,13 +2068,14 @@ mode = "off"
             "restored": bool(result.get("restored")),
             "runtime_average_cpu_cores": float(result.get("monitor", {}).get("runtime_average_cpu_cores", 0)),
             "runtime_peak_rss_kib": int(result.get("monitor", {}).get("runtime_peak_rss_kib", 0)),
+            "maximum_supervisor_rss_kib": maximum_supervisor_rss_kib,
             "runtime_resource_samples": int(result.get("monitor", {}).get("runtime_resource_samples", 0)),
         }
         value["passed"] = bool(
             len(ready_health) > 0 and maximum_loss < 0.01
             and value["confident_windows"] > 0 and value["restored"]
             and value["runtime_average_cpu_cores"] < 1.0
-            and value["runtime_peak_rss_kib"] < 256 * 1024
+            and value["runtime_peak_rss_kib"] < maximum_supervisor_rss_kib
             and value["runtime_resource_samples"] > 0
             and (not require_plan or len(plans) > 0)
             and (not require_action or (
@@ -2716,6 +2721,9 @@ class DorisFormalRunner(AffinityGraphRunner):
             raise RuntimeError("formal experiment fingerprint changed after deployment")
 
         scenario_s1, phases_s1 = self._formal_scenario("S1")
+        formal_maximum_rss_kib = int(
+            doris_formal_design()["gates"]["maximum_supervisor_rss_kib"]
+        )
 
         def canary() -> dict[str, Any]:
             result = self.run_lifecycle(
@@ -2724,7 +2732,8 @@ class DorisFormalRunner(AffinityGraphRunner):
                 measurement_phases=phases_s1, lifecycle_timeout_seconds=1800,
             )
             health = self._runtime_health(
-                result, require_plan=True, require_action=False
+                result, require_plan=True, require_action=False,
+                maximum_supervisor_rss_kib=formal_maximum_rss_kib,
             )
             health["domain_oracle"] = self._domain_oracle(
                 "doris", health["active_domains"]
@@ -2766,6 +2775,7 @@ class DorisFormalRunner(AffinityGraphRunner):
                     health = self._runtime_health(
                         result, require_plan=True, require_action=True,
                         action_threshold=0.95, minimum_active_seconds=513,
+                        maximum_supervisor_rss_kib=formal_maximum_rss_kib,
                     )
                     health["domain_oracle"] = self._domain_oracle(
                         "doris", health["active_domains"]

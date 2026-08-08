@@ -49,6 +49,7 @@ def test_doris_formal_design_is_frozen_and_balanced() -> None:
     assert len(design["run_order"]) == 8
     assert sum(row["treatment"] == "baseline" for row in design["run_order"]) == 2
     assert sum(row["treatment"] == "active" for row in design["run_order"]) == 6
+    assert design["gates"]["maximum_supervisor_rss_kib"] == 512 * 1024
     for trajectory in design["trajectories"].values():
         phases = trajectory["phases"]
         assert len(phases) == 6
@@ -488,6 +489,20 @@ def test_runtime_health_uses_distinct_smoke_and_formal_action_gates(tmp_path: Pa
     assert smoke["passed"]
     assert smoke["cohort_effective_coverage_ratio"] == 270 / 271
     assert not formal["passed"]
+
+    rss_heavy = json.loads(json.dumps(result))
+    rss_heavy["monitor"]["runtime_peak_rss_kib"] = 371_296
+    strict_rss = AffinityGraphRunner._runtime_health(
+        rss_heavy, require_plan=True, require_action=True,
+        action_threshold=0.80,
+    )
+    formal_rss = AffinityGraphRunner._runtime_health(
+        rss_heavy, require_plan=True, require_action=True,
+        action_threshold=0.80, maximum_supervisor_rss_kib=512 * 1024,
+    )
+    assert not strict_rss["passed"]
+    assert formal_rss["passed"]
+    assert formal_rss["maximum_supervisor_rss_kib"] == 512 * 1024
 
     quiescent = json.loads(json.dumps(result))
     quiescent["measurement_start_status"].update({

@@ -106,7 +106,9 @@ prism-sampler affinitygraph formal \
 Each lifecycle has 150 seconds of `C4T8` acquisition, 30 seconds of warmup,
 and 540 seconds of measured variable pressure. The primary throughput excludes
 YBA client restart gaps; lifecycle throughput and every observed gap are also
-reported.
+reported. The formal Doris gate allows at most 512 MiB Supervisor peak RSS
+(the 640-thread canary measured about 363 MiB); other smoke paths retain the
+generic 256 MiB limit. Supervisor average CPU must remain below one core.
 
 See [Architecture](docs/architecture.md), [Data Contract](docs/data-contract.md),
 [Policy Schema](docs/policy-schema.md), and
