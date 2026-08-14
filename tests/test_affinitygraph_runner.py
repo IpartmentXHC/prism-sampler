@@ -309,6 +309,31 @@ def test_scenario_has_independent_warmup_and_measurement(tmp_path: Path) -> None
     )
 
 
+def test_cold_start_scenario_has_idle_phase_only_before_measurement(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    config = tmp_path / "yba.env"
+    config.write_text("", encoding="utf-8")
+    runner = AffinityGraphRunner(tmp_path / "run", config, source, rounds=1, seed=7)
+    value = runner._scenario("C4T4", 60, cold_start=True).read_text(encoding="utf-8")
+    assert "SCENARIO_BUDGET_MODE=cold_start_duration" in value
+    assert "SCENARIO_PHASES='server_idle C4T4'" in value
+    assert "SCENARIO_PHASE_WARMUP" not in value
+    assert "SCENARIO_PHASE_server_idle_VALUE=30" in value
+
+
+def test_doris_controls_are_external_and_runtime_only_profile_is_empty(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "config/thread-profiles").mkdir(parents=True)
+    config = tmp_path / "doris.env"
+    config.write_text("DB_TYPE=doris\n", encoding="utf-8")
+    runner = AffinityGraphRunner(tmp_path / "run", config, source, rounds=1, seed=7, system="doris")
+    fallback = runner.doris_other_fallback_env()
+    assert fallback["THREAD_CLUSTER_DEFAULT_CPUS"] == "0-63,96-127"
+    assert "brpc_light" in fallback["THREAD_CLUSTER_RULES"]
+    assert runner.runtime_only_profile().name == "runtime-only-empty.json"
+
+
 def test_baseline_reference_is_validated_and_hashed(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -710,6 +735,22 @@ def test_affinitygraph_cli_defaults_to_three_rounds() -> None:
     assert positive.rounds == 2
     assert positive.seconds == 120
     assert positive.load is None
+    profile = parser.parse_args([
+        "affinitygraph", "validate-doris-thread-profile", "--root", "/tmp/profile",
+        "--base-config", "/tmp/doris.env", "--profile", "/tmp/profile.json",
+    ])
+    assert profile.seconds == 120
+    assert profile.rounds == 5
+    assert profile.profile == Path("/tmp/profile.json")
+    assert profile.loads == ("C2T2", "C4T4", "C5T16")
+    assert profile.startup_timeout_seconds == 360
+    assert not profile.steady_warmup
+    controls = parser.parse_args([
+        "affinitygraph", "validate-doris-controls", "--root", "/tmp/control",
+        "--base-config", "/tmp/doris.env", "--control", "runtime_only",
+    ])
+    assert controls.control == "runtime_only"
+    assert controls.rounds == 3
     recovery = parser.parse_args([
         "affinitygraph", "recover", "--root", "/tmp/old", "--note", "reviewed",
         "--diagnostic-root", "/tmp/diagnostic",

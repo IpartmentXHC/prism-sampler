@@ -274,6 +274,16 @@ def handle(event: str, context_path: Path) -> dict[str, Any]:
     if _requires_active_readiness(
         treatment, event, phase, measurement_set, active_ready_phase
     ):
+        if os.environ.get("AFFINITYGRAPH_STATIC_PROFILE") == "true":
+            value.update(
+                active_measurement_ready=True,
+                active_ready_phase=phase,
+                active_ready_attempts=1,
+                active_ready_wait_seconds=0.0,
+                readiness_mode="static_profile",
+            )
+            _write(output, value)
+            return value
         timeout = float(os.environ.get("AFFINITYGRAPH_ACTIVE_READY_TIMEOUT_SECONDS", "60"))
         started = time.monotonic()
         attempts = 1

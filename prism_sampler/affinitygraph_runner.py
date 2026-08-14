@@ -24,6 +24,16 @@ from .controller.metrics import format_cpu_list, parse_cpu_list
 
 LOADS = {"C2T2": (2, 2), "C4T6": (4, 6), "C5T16": (5, 16)}
 SMOKE_LOADS = {**LOADS, "C4T4": (4, 4)}
+DORIS_OTHER_FALLBACK_ENV = {
+    "ENABLE_THREAD_CLUSTER": "1",
+    "THREAD_CLUSTER_RULES": "light:^brpc_light$:64-95 pipe:^Pipe_normal:64-95",
+    "THREAD_CLUSTER_DEFAULT_NAME": "other",
+    "THREAD_CLUSTER_DEFAULT_CPUS": "0-63,96-127",
+    "THREAD_CLUSTER_BIND_INTERVAL": "1",
+    "THREAD_CLUSTER_BIND_MAX_SECONDS": "0",
+    "THREAD_CLUSTER_STRICT": "0",
+    "THREAD_CLUSTER_REQUIRE_STABLE": "0",
+}
 DORIS_FORMAL_LOADS = {
     "C1T1": (1, 1), "C2T2": (2, 2), "C3T4": (3, 4),
     "C4T8": (4, 8), "C5T12": (5, 12), "C5T16": (5, 16),
@@ -703,6 +713,41 @@ def _write(path: Path, text: str) -> None:
     temporary.replace(path)
 
 
+def _scenario_output_complete(path: Path, phases: list[str], minimum_seconds: int) -> bool:
+    """Accept a completed measurement when only dual-host teardown returned non-zero."""
+    summary_path = path / "scenario-summary.csv"
+    timeline_path = path / "scenario-timeline.csv"
+    if not summary_path.is_file() or not timeline_path.is_file():
+        return False
+    try:
+        with summary_path.open(newline="", encoding="utf-8") as stream:
+            summaries = list(csv.DictReader(stream))
+        aggregate = next(
+            row for row in summaries if row.get("record_type") == "aggregate"
+        )
+        if aggregate.get("status") != "ok":
+            return False
+        if float(aggregate.get("error_count", 0)) != 0 or float(
+            aggregate.get("timeout_count", 0)
+        ) != 0:
+            return False
+        with timeline_path.open(newline="", encoding="utf-8") as stream:
+            timeline = list(csv.DictReader(stream))
+        if not timeline or any(row.get("status") != "ok" for row in timeline):
+            return False
+        measured = {
+            str(row.get("phase")): float(row.get("elapsed_seconds", 0))
+            for row in timeline
+            if str(row.get("phase")) in phases
+        }
+        return len(measured) == len(phases) and all(
+            seconds >= max(float(minimum_seconds) - 2.0, 0.0)
+            for seconds in measured.values()
+        )
+    except (OSError, StopIteration, TypeError, ValueError):
+        return False
+
+
 class AffinityGraphRunner:
     def __init__(
         self, root: Path, base_config: Path, source: Path, *, rounds: int, seed: int,
@@ -1004,13 +1049,34 @@ done
         return manifest
 
     def _scenario(
-        self, load: str, seconds: int, *, acquisition_seconds: int = 0
+        self, load: str, seconds: int, *, acquisition_seconds: int = 0,
+        cold_start: bool = False,
     ) -> Path:
         clients, threads = SMOKE_LOADS[load]
         warmup = int(self.state["warmup_seconds"])
         acquisition = int(acquisition_seconds)
         if acquisition < 0:
             raise ValueError("acquisition_seconds cannot be negative")
+        if cold_start:
+            idle = int(self.state.get("cold_start_idle_seconds", 30))
+            if idle < 1:
+                raise ValueError("cold start idle seconds must be positive")
+            path = self.generated / f"scenario-{load}-cold-i{idle}-m{seconds}.env"
+            _write(path, f"""SCENARIO_NAME=affinitygraph_{load.lower()}_cold_i{idle}_m{seconds}
+SCENARIO_BUDGET_MODE=cold_start_duration
+SCENARIO_PHASES='server_idle {load}'
+SCENARIO_MIN_PHASE_SECONDS=30
+SCENARIO_TIMEOUT_GRACE_SECONDS=45
+SCENARIO_DURATION_TOLERANCE_SECONDS=2
+SCENARIO_DURATION_OPERATIONCOUNT_PER_CLIENT=2147483647
+SCENARIO_PHASE_server_idle_CLIENTS=1
+SCENARIO_PHASE_server_idle_THREADS=1
+SCENARIO_PHASE_server_idle_VALUE={idle}
+SCENARIO_PHASE_{load}_CLIENTS={clients}
+SCENARIO_PHASE_{load}_THREADS={threads}
+SCENARIO_PHASE_{load}_VALUE={seconds}
+""")
+            return path
         suffix = f"-a{acquisition}" if acquisition else ""
         phases = f"PLACEMENT WARMUP {load}" if acquisition else f"WARMUP {load}"
         placement = ""
@@ -1036,7 +1102,19 @@ SCENARIO_PHASE_{load}_VALUE={seconds}
 """)
         return path
 
-    def _runtime_config(self, name: str, mode: str, run_dir: Path) -> tuple[Path, str, str]:
+    def doris_other_fallback_env(self) -> dict[str, str]:
+        """Return the external watcher settings for the other-thread control."""
+        if self.system != "doris":
+            raise ValueError("other-thread fallback is only defined for Doris")
+        return dict(DORIS_OTHER_FALLBACK_ENV)
+
+    def runtime_only_profile(self) -> Path:
+        """Return the repository-controlled empty profile used for telemetry-only runs."""
+        return self.source / "config/thread-profiles/runtime-only-empty.json"
+
+    def _runtime_config(
+        self, name: str, mode: str, run_dir: Path, *, thread_profile: Path | None = None,
+    ) -> tuple[Path, str, str]:
         remote_root = f"/home/xhc/.local/share/affinitygraph/experiments/{self.root.name}/{name}"
         log_dir = f"{remote_root}/log"
         socket_id = hashlib.sha256(f"{self.root.name}/{name}".encode()).hexdigest()[:20]
@@ -1129,11 +1207,22 @@ pthread_uprobe = true
             f"chmod 700 {shlex.quote(remote_root)} {shlex.quote(log_dir)}"
         )
         self.host.copy_to(config, remote_config)
+        profile_flags = ""
+        if thread_profile:
+            remote_profile = f"{remote_root}/thread-profile.json"
+            remote_output = f"{remote_root}/thread-profile-candidate.json"
+            self.host.copy_to(thread_profile, remote_profile)
+            profile_flags = (
+                f"--thread-profile {shlex.quote(remote_profile)} "
+                f"--profile-output {shlex.quote(remote_output)} "
+                f"--experiment-id {shlex.quote(self.root.name)} "
+                f"--test-id {shlex.quote(name)} "
+            )
         wrapper = run_dir / f"{self.system}-affinitygraph"
         _write(wrapper, f"""#!/usr/bin/env bash
 exec env SUDO_ASKPASS={shlex.quote(ASKPASS)} sudo -A env CLICKHOUSE_WATCHDOG_ENABLE=0 /lib/ld-linux-aarch64.so.1 \\
   --library-path {shlex.quote(self.release + '/lib')} {shlex.quote(self.release + '/build/affinity-run')} run \\
-  --config {shlex.quote(remote_config)} \\
+  --config {shlex.quote(remote_config)} {profile_flags}\\
   --bpf-object {shlex.quote(self.release + '/affinitygraph.bpf.o')} \\
   --user xhc -- {shlex.quote(REAL_CLICKHOUSE)} "$@"
 """)
@@ -1144,7 +1233,7 @@ log={shlex.quote(log_dir + '/doris-supervisor.out')}
 nohup env SUDO_ASKPASS={shlex.quote(ASKPASS)} sudo -A \
   /lib/ld-linux-aarch64.so.1 --library-path {shlex.quote(self.release + '/lib')} \
   {shlex.quote(self.release + '/build/affinity-run')} run \
-  --config {shlex.quote(remote_config)} \
+  --config {shlex.quote(remote_config)} {profile_flags}\
   --bpf-object {shlex.quote(self.release + '/affinitygraph.bpf.o')} \
   --user xhc -- /usr/bin/bash {shlex.quote(DORIS_START_BE)} --console \
   >>"$log" 2>&1 </dev/null &
@@ -1468,6 +1557,7 @@ mode = "off"
         soft_quality_gates: bool = False,
         measurement_phases: list[str] | None = None,
         lifecycle_timeout_seconds: int | None = None,
+        startup_timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         samples: list[dict[str, Any]] = []
         monitor_path = run_dir / "runtime-monitor.jsonl"
@@ -1495,8 +1585,14 @@ mode = "off"
         loss_warning_recorded = False
         processed_requests: set[str] = set()
         monitor_start_name = (
-            "phase_before-PLACEMENT.json"
-            if treatment == "active" else "phase_before-WARMUP.json"
+            "server_ready-server.json"
+            if hook_env.get("AFFINITYGRAPH_COLD_START") == "true"
+            else (
+                "phase_before-PLACEMENT.json"
+                if treatment == "active"
+                and hook_env.get("AFFINITYGRAPH_STATIC_PROFILE") != "true"
+                else "phase_before-WARMUP.json"
+            )
         )
         phases = measurement_phases or [load]
         measurement_names = [f"phase_before-{phase}.json" for phase in phases]
@@ -1508,9 +1604,23 @@ mode = "off"
         lifecycle_started = time.monotonic()
 
         while process.poll() is None:
+            elapsed = time.monotonic() - lifecycle_started
+            if (
+                startup_timeout_seconds is not None
+                and not (hook_root / monitor_start_name).is_file()
+                and elapsed >= startup_timeout_seconds
+            ):
+                hard_failure = (
+                    f"YBA startup exceeded {startup_timeout_seconds}s before {monitor_start_name}"
+                )
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                break
             if (
                 lifecycle_timeout_seconds is not None
-                and time.monotonic() - lifecycle_started >= lifecycle_timeout_seconds
+                and elapsed >= lifecycle_timeout_seconds
             ):
                 hard_failure = (
                     f"YBA lifecycle exceeded {lifecycle_timeout_seconds}s"
@@ -1754,10 +1864,25 @@ mode = "off"
         soft_quality_gates: bool = False,
         static_profile: str | None = None,
         profile_env: dict[str, str] | None = None,
+        thread_profile: Path | None = None,
         scenario_path: Path | None = None,
         measurement_phases: list[str] | None = None,
         lifecycle_timeout_seconds: int | None = None,
+        startup_timeout_seconds: int | None = None,
+        cold_start: bool = False,
+        other_fallback: bool = False,
+        runtime_only: bool = False,
     ) -> dict[str, Any]:
+        if runtime_only:
+            if self.system != "doris":
+                raise ValueError("runtime-only control is currently defined for Doris")
+            if treatment != "observe":
+                raise ValueError("runtime-only control must use treatment=observe")
+            thread_profile = thread_profile or self.runtime_only_profile()
+            if not thread_profile.is_file():
+                raise FileNotFoundError(thread_profile)
+        if other_fallback and self.system != "doris":
+            raise ValueError("other-thread fallback is only defined for Doris")
         run_dir = self.runs / name
         if run_dir.exists():
             archive = self.runs / "superseded" / f"{name}-{time.time_ns()}"
@@ -1788,14 +1913,20 @@ mode = "off"
             "AFFINITYGRAPH_MEASUREMENT_PHASE": load,
             "AFFINITYGRAPH_MEASUREMENT_PHASES": ",".join(phases),
             "AFFINITYGRAPH_ACTIVE_READY_PHASE": (
-                "WARMUP" if treatment == "active" else load
+                load
             ),
+            "AFFINITYGRAPH_COLD_START": "true" if cold_start else "false",
             "AFFINITYGRAPH_ACTIVE_READY_TIMEOUT_SECONDS": "60",
             "AFFINITYGRAPH_RELAY_TIMEOUT_SECONDS": "90",
             # active readiness 和逐 TID mask 校验属于安全门禁，不能随 smoke
             # 环境质量门禁一起软化。
             "AFFINITYGRAPH_ACTIVE_READINESS_REQUIRED": "true",
         })
+        if thread_profile:
+            # A static profile deliberately skips the legacy solver.  Its
+            # profile-specific post-run gate verifies applied masks instead.
+            env["AFFINITYGRAPH_ACTIVE_READINESS_REQUIRED"] = "false"
+            env["AFFINITYGRAPH_STATIC_PROFILE"] = "true"
         remote_log = ""
         socket = ""
         remote_hook_root = ""
@@ -1804,10 +1935,12 @@ mode = "off"
                 env["CLICKHOUSE_BIN"] = self._baseline_wrapper(name, run_dir)
             env["ENABLE_EXTERNAL_HOOK"] = "0"
         else:
-            _, socket, wrapper = self._runtime_config(name, treatment, run_dir)
+            _, socket, wrapper = self._runtime_config(
+                name, treatment, run_dir, thread_profile=thread_profile,
+            )
             remote_hook_root, remote_hook = self._remote_hook(
                 name, run_dir, treatment, socket, phases,
-                "WARMUP" if treatment == "active" else load,
+                load,
             )
             env.update({
                 "ENABLE_EXTERNAL_HOOK": "1",
@@ -1840,12 +1973,15 @@ mode = "off"
             remote_log = f"/home/xhc/.local/share/affinitygraph/experiments/{self.root.name}/{name}/log/runtime.jsonl"
         if profile_env:
             env.update(profile_env)
+        if other_fallback:
+            env.update(self.doris_other_fallback_env())
         acquisition_seconds = (
             int(self.state["active_acquisition_seconds"])
-            if treatment == "active" else 0
+            if treatment == "active" and thread_profile is None else 0
         )
         scenario = scenario_path or self._scenario(
-            load, seconds, acquisition_seconds=acquisition_seconds
+            load, seconds, acquisition_seconds=acquisition_seconds,
+            cold_start=cold_start,
         )
         command = [
             str(self.yba_root / "bin/yba"), "scenario", "--config",
@@ -1875,6 +2011,7 @@ mode = "off"
                 soft_quality_gates=soft_quality_gates,
                 measurement_phases=phases,
                 lifecycle_timeout_seconds=lifecycle_timeout_seconds,
+                startup_timeout_seconds=startup_timeout_seconds,
             )
             self._fetch_remote_hooks(remote_hook_root, hook_root)
             code = int(monitor["returncode"])
@@ -1893,12 +2030,34 @@ mode = "off"
                 self._save()
                 raise RuntimeError(f"hard BPF failure: {monitor['hard_failure']}")
         if code:
+            # YBA's dual-host path can return a teardown/rsync status after it
+            # has already copied a complete, error-free measurement. Preserve
+            # that evidence, but only when every requested measurement phase
+            # is present and meets its duration; startup or workload failures
+            # remain hard failures.
+            if _scenario_output_complete(yba_output, phases, seconds):
+                warning = run_dir / "post-measurement-warning.json"
+                _write(warning, json.dumps({
+                    "yba_returncode": code,
+                    "classification": "post_measurement_warning",
+                    "scenario_output": str(yba_output),
+                    "recorded_realtime_ns": time.time_ns(),
+                }, indent=2, sort_keys=True) + "\n")
+                code = 0
+            else:
+                code = code
+        if code:
             if remote_log:
                 try:
                     self.host.copy_from(remote_log, run_dir / "runtime-failed.jsonl")
                 except Exception:
                     pass
-            if treatment != "baseline" and not (hook_root / "phase_before-WARMUP.json").is_file():
+            startup_marker = (
+                "server_ready-server.json"
+                if env.get("AFFINITYGRAPH_COLD_START") == "true"
+                else "phase_before-WARMUP.json"
+            )
+            if treatment != "baseline" and not (hook_root / startup_marker).is_file():
                 server_ready = hook_root / "server_ready-server.json"
                 bpf_was_observable = False
                 if server_ready.is_file():
@@ -1959,6 +2118,14 @@ mode = "off"
             result["measurement_start"] = measurement_start
             result["measurement_start_status"] = measurement_start.get("runtime_status")
             result["measurement_starts"] = measurement_starts
+            if thread_profile:
+                remote_candidate = (
+                    f"/home/xhc/.local/share/affinitygraph/experiments/"
+                    f"{self.root.name}/{name}/thread-profile-candidate.json"
+                )
+                local_candidate = run_dir / "thread-profile-candidate.json"
+                self.host.copy_from(remote_candidate, local_candidate)
+                result["profile_candidate"] = str(local_candidate)
         cluster_summaries = sorted({
             *yba_output.glob("thread-cluster/summary.csv"),
             *yba_output.glob("phases/*/thread-cluster/summary.csv"),
@@ -2959,6 +3126,223 @@ def diagnose_positive_control(
         runner.summary / "positive-control.json",
         json.dumps(report, indent=2, sort_keys=True) + "\n",
     )
+    return report
+
+
+def _doris_profile_runtime_validation(result: dict[str, Any]) -> dict[str, Any]:
+    events = [
+        json.loads(line)
+        for line in Path(result["runtime_log"]).read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    matches = [row for row in events if row.get("type") == "profile_match"]
+    by_rule = {
+        rule: [row for row in matches if row.get("rule_id") == rule]
+        for rule in ("doris-brpc-light-node2", "doris-pipe-normal-node2")
+    }
+    health = [row for row in events if row.get("type") == "bpf_health" and row.get("valid")]
+    loss = max((float(row.get("window_loss_ratio", 0)) for row in health), default=1.0)
+    holds = [
+        row for row in events
+        if row.get("type") == "solve_window_end"
+        and row.get("outcome") == "profile_static_hold"
+    ]
+    unexpected = [
+        row for row in matches
+        if row.get("rule_id") not in by_rule
+        or row.get("target_cpus") != "64-95"
+    ]
+    restore = [row for row in events if row.get("type") == "runtime_stop"]
+    return {
+        "brpc_light_matches": len(by_rule["doris-brpc-light-node2"]),
+        "pipe_normal_matches": len(by_rule["doris-pipe-normal-node2"]),
+        "unexpected_profile_matches": len(unexpected),
+        "profile_static_hold_windows": len(holds),
+        "maximum_bpf_loss_ratio": loss,
+        "restored": bool(result.get("restored")),
+        "runtime_stop_logged": bool(restore),
+        "passed": bool(
+            len(by_rule["doris-brpc-light-node2"]) == 512
+            and len(by_rule["doris-pipe-normal-node2"]) == 128
+            and not unexpected and holds and loss < 0.01
+            and result.get("restored") and restore
+        ),
+    }
+
+
+def validate_doris_thread_profile(
+    root: Path, base_config: Path, source: Path, *, profile: Path,
+    loads: tuple[str, ...] = ("C2T2", "C4T4", "C5T16"),
+    seconds: int = 120, rounds: int = 5, seed: int = 20260812,
+    startup_timeout_seconds: int = 360,
+    cold_start: bool = True,
+) -> dict[str, Any]:
+    if seconds < 60 or seconds > 300:
+        raise ValueError("profile validation measurement must be between 60 and 300 seconds")
+    if rounds != 5:
+        raise ValueError("Doris profile-v1 validation requires exactly five paired rounds")
+    if not loads or any(load not in SMOKE_LOADS for load in loads):
+        raise ValueError(f"unsupported Doris profile loads: {loads}")
+    if startup_timeout_seconds < 60:
+        raise ValueError("startup timeout must be at least 60 seconds")
+    seed_profile = json.loads(profile.read_text(encoding="utf-8"))
+    if seed_profile.get("schema_version") != 1:
+        raise ValueError("thread profile schema_version must be 1")
+    runner = AffinityGraphRunner(
+        root, base_config, source, rounds=rounds, seed=seed,
+        system="doris", smoke_load=loads[0],
+    )
+    deployed = runner._step("deploy", runner.deploy)
+    runner.release = deployed["release"]
+    schedule = [
+        {"load": load, "round": round_number, "treatment": treatment}
+        for load_index, load in enumerate(loads)
+        for round_number in range(1, rounds + 1)
+        for treatment in random.Random(seed + load_index * 100 + round_number).sample(
+            ["unrestricted", "profile"], k=2
+        )
+    ]
+    runner.state["thread_profile_schedule"] = schedule
+    runner._save()
+    rows: list[dict[str, Any]] = []
+    for position, item in enumerate(schedule, 1):
+        treatment = str(item["treatment"])
+        load = str(item["load"])
+        round_number = int(item["round"])
+        name = f"profile-v1-{position:02d}-{treatment}-{load}-r{round_number}"
+        active = treatment == "profile"
+        result = runner._step(
+            f"thread_profile_{position:02d}_{treatment}_r{round_number}",
+            lambda active=active, name=name, round_number=round_number: runner.run_lifecycle(
+                "active" if active else "baseline", load, round_number, name,
+                seconds=seconds, static_profile=treatment,
+                thread_profile=profile if active else None,
+                lifecycle_timeout_seconds=startup_timeout_seconds + 30 + seconds + 180,
+                startup_timeout_seconds=startup_timeout_seconds if active else None,
+                cold_start=cold_start,
+            ),
+        )
+        validation = _doris_profile_runtime_validation(result) if active else {"passed": True}
+        rows.append({**result, "profile_validation": validation, "valid": validation["passed"]})
+        if not validation["passed"]:
+            raise RuntimeError(f"thread profile safety gate failed: {validation}")
+    indexed = {(
+        str(row["load"]), int(row["round"]), str(row["profile"])
+    ): row for row in rows}
+    reports: dict[str, Any] = {}
+    candidate_paths: dict[str, str] = {}
+    for load in loads:
+        effects = []
+        for round_number in range(1, rounds + 1):
+            baseline = indexed[(load, round_number, "unrestricted")]
+            treatment = indexed[(load, round_number, "profile")]
+            effects.append({
+                "round": round_number,
+                "baseline_throughput": float(baseline["throughput"]),
+                "profile_throughput": float(treatment["throughput"]),
+                "uplift": float(treatment["throughput"]) / float(baseline["throughput"]) - 1.0,
+                "baseline_p99_latency_us": float(baseline.get("p99_latency_us", math.nan)),
+                "profile_p99_latency_us": float(treatment.get("p99_latency_us", math.nan)),
+            })
+        profile_rows = [row for row in rows if row["load"] == load and row["treatment"] == "active"]
+        candidates = [Path(row["profile_candidate"]) for row in profile_rows]
+        models = [json.loads(path.read_text(encoding="utf-8")) for path in candidates]
+        if len(models) != rounds or any(model["placements"] != models[0]["placements"] for model in models[1:]):
+            raise RuntimeError(f"profile exports disagree for {load}")
+        output = source / f"config/thread-profiles/doris-light-pipe-node2-{load.lower()}.candidate.json"
+        shutil.copyfile(candidates[-1], output)
+        candidate_paths[load] = str(output)
+        uplifts = [effect["uplift"] for effect in effects]
+        mean = statistics.mean(uplifts)
+        stdev = statistics.stdev(uplifts) if len(uplifts) > 1 else 0.0
+        reports[load] = {
+            "pairs": len(effects), "wins": sum(value > 0 for value in uplifts),
+            "mean_uplift": mean, "mean_uplift_pct": mean * 100,
+            "uplift_ci95_half_width": 2.776 * stdev / math.sqrt(len(uplifts)),
+            "effects": effects,
+            "profile_validation": [row["profile_validation"] for row in profile_rows],
+            "candidate_profile": str(output),
+        }
+    report: dict[str, Any] = {
+        "complete": all(value["pairs"] == rounds for value in reports.values()),
+        "loads": reports, "runs": rows,
+    }
+    report.update({
+        "schema": "prism-sampler.doris-thread-profile-validation.v1",
+        "rounds": rounds, "measurement_seconds": seconds,
+        "warmup_seconds": int(runner.state["warmup_seconds"]), "schedule": schedule,
+        "release": runner.release, "profile_seed": str(profile),
+        "candidate_profiles": candidate_paths, "candidate_status": "candidate",
+        "startup_timeout_seconds": startup_timeout_seconds,
+        "cold_start": cold_start,
+        "cold_start_idle_seconds": int(runner.state.get("cold_start_idle_seconds", 30)),
+    })
+    runner.state["status"] = "thread_profile_validation_complete"
+    runner._save()
+    _write(runner.summary / "thread-profile-validation.json", json.dumps(report, indent=2, sort_keys=True) + "\n")
+    return report
+
+
+def validate_doris_controls(
+    root: Path, base_config: Path, source: Path, *,
+    control: str, profile: Path | None = None, seconds: int = 120,
+    rounds: int = 3, seed: int = 20260813,
+    startup_timeout_seconds: int = 360, cold_start: bool = True,
+) -> dict[str, Any]:
+    """Run the bounded C5T16 control matrix without changing profile schema."""
+    if control not in {"other_fallback", "runtime_only"}:
+        raise ValueError("control must be other_fallback or runtime_only")
+    if seconds < 60 or rounds < 1:
+        raise ValueError("control measurement requires seconds >= 60 and rounds >= 1")
+    if control == "other_fallback" and profile is None:
+        raise ValueError("other_fallback requires --profile")
+    runner = AffinityGraphRunner(
+        root, base_config, source, rounds=rounds, seed=seed,
+        system="doris", smoke_load="C5T16",
+    )
+    deployed = runner._step("deploy", runner.deploy)
+    runner.release = deployed["release"]
+    rows: list[dict[str, Any]] = []
+    if control == "other_fallback":
+        cells = [("profile", False), ("profile_other_fallback", True)]
+    else:
+        cells = [("runtime_only", False)]
+    for round_number in range(1, rounds + 1):
+        for label, fallback in cells:
+            name = f"control-{control}-{label}-C5T16-r{round_number}"
+            result = runner._step(
+                name,
+                lambda label=label, fallback=fallback, name=name, round_number=round_number:
+                    runner.run_lifecycle(
+                        "observe" if control == "runtime_only" else "active",
+                        "C5T16", round_number, name, seconds=seconds,
+                        static_profile=label,
+                        thread_profile=(profile if control == "other_fallback" else None),
+                        cold_start=cold_start,
+                        other_fallback=fallback,
+                        runtime_only=control == "runtime_only",
+                        lifecycle_timeout_seconds=startup_timeout_seconds + seconds + 180,
+                        startup_timeout_seconds=startup_timeout_seconds,
+                    ),
+            )
+            result["control"] = control
+            result["control_label"] = label
+            rows.append(result)
+    report = {
+        "schema": "prism-sampler.doris-thread-profile-controls.v1",
+        "control": control,
+        "load": "C5T16",
+        "rounds": rounds,
+        "measurement_seconds": seconds,
+        "cold_start": cold_start,
+        "cold_start_idle_seconds": int(runner.state.get("cold_start_idle_seconds", 30)),
+        "profile": str(profile) if profile else str(runner.runtime_only_profile()),
+        "runs": rows,
+        "release": runner.release,
+    }
+    runner.state["status"] = "doris_controls_complete"
+    runner._save()
+    _write(runner.summary / f"doris-{control}.json", json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
 
 

@@ -14,6 +14,8 @@ from .affinitygraph_runner import (
     approve_smoke as approve_affinitygraph_smoke,
     diagnose_observe as diagnose_affinitygraph_observe,
     diagnose_positive_control as diagnose_affinitygraph_positive_control,
+    validate_doris_thread_profile as validate_affinitygraph_doris_thread_profile,
+    validate_doris_controls as validate_affinitygraph_doris_controls,
     execute as execute_affinitygraph,
     execute_doris_formal as execute_affinitygraph_doris_formal,
     recover as recover_affinitygraph,
@@ -294,6 +296,36 @@ def build_parser() -> argparse.ArgumentParser:
     affinitygraph_positive.add_argument(
         "--load", choices=("C2T2", "C4T4", "C4T6", "C5T16")
     )
+    affinitygraph_profile = affinitygraph_sub.add_parser("validate-doris-thread-profile")
+    affinitygraph_profile.add_argument("--root", required=True, type=Path)
+    affinitygraph_profile.add_argument("--base-config", required=True, type=Path)
+    affinitygraph_profile.add_argument("--profile", required=True, type=Path)
+    affinitygraph_profile.add_argument(
+        "--source", type=Path, default=Path("/data/threadState/affinitygraph")
+    )
+    affinitygraph_controls = affinitygraph_sub.add_parser("validate-doris-controls")
+    affinitygraph_controls.add_argument("--root", required=True, type=Path)
+    affinitygraph_controls.add_argument("--base-config", required=True, type=Path)
+    affinitygraph_controls.add_argument("--control", choices=("other_fallback", "runtime_only"), required=True)
+    affinitygraph_controls.add_argument("--profile", type=Path)
+    affinitygraph_controls.add_argument("--source", type=Path, default=Path("/data/threadState/affinitygraph"))
+    affinitygraph_controls.add_argument("--seconds", type=int, default=120)
+    affinitygraph_controls.add_argument("--rounds", type=int, default=3)
+    affinitygraph_controls.add_argument("--seed", type=int, default=20260813)
+    affinitygraph_controls.add_argument("--startup-timeout-seconds", type=int, default=360)
+    affinitygraph_controls.add_argument("--steady-warmup", action="store_true")
+    affinitygraph_profile.add_argument("--seconds", type=int, default=120)
+    affinitygraph_profile.add_argument("--rounds", type=int, default=5)
+    affinitygraph_profile.add_argument("--seed", type=int, default=20260812)
+    affinitygraph_profile.add_argument(
+        "--loads", nargs="+", choices=("C2T2", "C4T4", "C5T16"),
+        default=("C2T2", "C4T4", "C5T16"),
+    )
+    affinitygraph_profile.add_argument("--startup-timeout-seconds", type=int, default=360)
+    affinitygraph_profile.add_argument(
+        "--steady-warmup", action="store_true",
+        help="retain the legacy load-generating WARMUP instead of cold-start protocol",
+    )
     affinitygraph_approve = affinitygraph_sub.add_parser("approve-smoke")
     affinitygraph_approve.add_argument("--root", required=True, type=Path)
     affinitygraph_approve.add_argument("--note", required=True)
@@ -392,6 +424,20 @@ def main() -> None:
         print(json.dumps(diagnose_affinitygraph_positive_control(
             args.root, args.base_config, args.source, seconds=args.seconds,
             rounds=args.rounds, seed=args.seed, system=args.system, load=args.load,
+        ), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "validate-doris-thread-profile":
+        print(json.dumps(validate_affinitygraph_doris_thread_profile(
+            args.root, args.base_config, args.source, profile=args.profile,
+            loads=tuple(args.loads), seconds=args.seconds, rounds=args.rounds,
+            seed=args.seed, startup_timeout_seconds=args.startup_timeout_seconds,
+            cold_start=not args.steady_warmup,
+        ), indent=2, sort_keys=True))
+    elif args.command == "affinitygraph" and args.affinitygraph_command == "validate-doris-controls":
+        print(json.dumps(validate_affinitygraph_doris_controls(
+            args.root, args.base_config, args.source, control=args.control,
+            profile=args.profile, seconds=args.seconds, rounds=args.rounds,
+            seed=args.seed, startup_timeout_seconds=args.startup_timeout_seconds,
+            cold_start=not args.steady_warmup,
         ), indent=2, sort_keys=True))
     elif args.command == "affinitygraph" and args.affinitygraph_command == "recover":
         print(json.dumps(recover_affinitygraph(
